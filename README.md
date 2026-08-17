@@ -6,7 +6,7 @@
   <img src="https://raw.githubusercontent.com/codexstar69/pi-listen/main/assets/banner.png" alt="pi-listen — Voice input for the Pi coding agent" width="100%" />
 </p>
 
-**Hold-to-talk voice input for [Pi](https://github.com/mariozechner/pi-coding-agent).** Cloud streaming via Deepgram or fully offline with local models.
+**Voice input and output for [Pi](https://github.com/mariozechner/pi-coding-agent).** Use hold-to-talk dictation or a hands-free, fully local-audio conversation loop.
 
 [![npm version](https://img.shields.io/npm/v/@codexstar/pi-listen.svg)](https://www.npmjs.com/package/@codexstar/pi-listen)
 [![license](https://img.shields.io/npm/l/@codexstar/pi-listen.svg)](https://github.com/codexstar69/pi-listen/blob/main/LICENSE)
@@ -159,6 +159,47 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 | `/voice stop` | Stop active recording or dictation |
 | `/voice history` | Recent transcriptions |
 | `/voice` | Toggle on/off |
+| `/talk on` / `off` | Start or stop hands-free local conversation |
+| `/talk status` | Show the active speech models, text model, and endpoint timing |
+
+### Hands-free conversation
+
+`/talk on` starts an automatic conversation loop. Speak normally; energy-based voice activity detection decides when the utterance ends, Parakeet transcribes it locally, Pi answers, and Kokoro speaks the answer locally. The microphone starts listening again after playback, so no key is held or pressed between turns. `/talk off` immediately stops capture and playback.
+
+Talk mode is intentionally speaker-safe and half duplex. It closes microphone capture before transcription and keeps it closed while Pi answers and Kokoro plays audio. This prevents the assistant's own voice from becoming the next user utterance without requiring cloud echo cancellation. Microphone audio never leaves the machine; only the resulting text is sent to the configured Pi model.
+
+The mode is isolated from ordinary Pi turns:
+
+- Its conversational system prompt asks for short spoken sentences without headings, lists, tables, Markdown, or code-heavy text.
+- It temporarily limits tools to a configured read-only allowlist.
+- It can temporarily select a dedicated text model and thinking level.
+- `/talk off` restores the exact previous model, thinking level, and active tools.
+- Ordinary TTS remains controlled separately by `ttsEnabled`; talk speech does not enable it globally.
+
+The defaults use `parakeet-v3`, `kokoro-en-v0_19`, and low thinking. Set a dedicated text model under `voice.talk`:
+
+```json
+{
+  "voice": {
+    "talk": {
+      "modelProvider": "openai-codex",
+      "modelId": "gpt-5.6-terra",
+      "thinkingLevel": "low",
+      "sttModel": "parakeet-v3",
+      "ttsModel": "kokoro-en-v0_19",
+      "ttsVoiceId": 0,
+      "allowedTools": ["read", "grep", "find", "ls"],
+      "vad": {
+        "startDb": 9,
+        "hangoverMs": 500,
+        "minSpeechMs": 300,
+        "maxUtteranceMs": 30000,
+        "preRollMs": 300
+      }
+    }
+  }
+}
+```
 
 ### v7.1 keyboard
 

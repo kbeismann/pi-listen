@@ -43,6 +43,47 @@ describe("loadConfigWithSource", () => {
 		expect(result.config.enabled).toBe(true);
 		expect(result.config.onboarding.completed).toBe(false);
 		expect(result.config.scope).toBe("global");
+		expect(result.config.talk.sttModel).toBe("parakeet-v3");
+		expect(result.config.talk.ttsModel).toBe("kokoro-en-v0_19");
+		expect(result.config.talk.thinkingLevel).toBe("low");
+		expect(result.config.talk.vad.hangoverMs).toBe(500);
+	});
+
+	test("normalizes continuous talk settings without widening tool access", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		writeSettings(agentDir, "settings.json", {
+			onboarding: { completed: true },
+			talk: {
+				modelProvider: " openai-codex ",
+				modelId: " gpt-5.6-terra ",
+				thinkingLevel: "turbo",
+				sttModel: "parakeet-v3",
+				ttsModel: "kokoro-en-v0_19",
+				ttsVoiceId: "zero",
+				allowedTools: ["read", "read", 42, "grep", "bash", "write"],
+				vad: { hangoverMs: 50, thresholdDb: -35 },
+			},
+		});
+
+		const talk = loadConfigWithSource(cwd, { agentDir }).config.talk;
+		expect(talk.modelProvider).toBe("openai-codex");
+		expect(talk.modelId).toBe("gpt-5.6-terra");
+		expect(talk.thinkingLevel).toBe("low");
+		expect(talk.ttsVoiceId).toBe(0);
+		expect(talk.allowedTools).toEqual(["read", "grep"]);
+		expect(talk.vad.hangoverMs).toBe(500);
+		expect(talk.vad.thresholdDb).toBe(-35);
+	});
+
+	test("accepts max thinking for a talk model that supports it", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		writeSettings(agentDir, "settings.json", {
+			talk: { thinkingLevel: "max" },
+		});
+
+		expect(loadConfigWithSource(cwd, { agentDir }).config.talk.thinkingLevel).toBe("max");
 	});
 
 	test("migrates legacy global config and marks onboarding complete when backend and model were explicit", () => {

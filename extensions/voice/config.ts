@@ -23,6 +23,31 @@ export interface VoiceOnboardingState {
 
 export type VoiceBackend = "deepgram" | "local";
 
+export type TalkThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const TALK_READ_ONLY_TOOLS = Object.freeze(["read", "grep", "find", "ls"]);
+
+export interface ContinuousTalkConfig {
+	/** Text model selected only while /talk is active. Omit both fields to keep the current model. */
+	modelProvider?: string;
+	modelId?: string;
+	thinkingLevel: TalkThinkingLevel;
+	/** Local speech models used by the hands-free conversation loop. */
+	sttModel: string;
+	ttsModel: string;
+	ttsVoiceId: number;
+	/** Read-only tools available while spoken input can trigger turns automatically. */
+	allowedTools: string[];
+	/** Energy-VAD endpointing. Lower hangover is faster but can split hesitant speech. */
+	vad: {
+		startDb: number;
+		thresholdDb?: number;
+		hangoverMs: number;
+		minSpeechMs: number;
+		maxUtteranceMs: number;
+		preRollMs: number;
+	};
+}
+
 export interface VoiceConfig {
 	version: number;
 	enabled: boolean;
@@ -102,6 +127,8 @@ export interface VoiceConfig {
 	 * don't re-spam the same notification. New in v7.0.0.
 	 */
 	ttsOnboardingShown?: boolean;
+	/** Hands-free, local-audio conversation settings for /talk. */
+	talk: ContinuousTalkConfig;
 }
 
 export interface LoadedVoiceConfig {
@@ -138,6 +165,23 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	ttsLanguage: undefined,
 	ttsDeepgramStreaming: false,
 	ttsOnboardingShown: false,
+	talk: {
+		modelProvider: undefined,
+		modelId: undefined,
+		thinkingLevel: "low",
+		sttModel: "parakeet-v3",
+		ttsModel: "kokoro-en-v0_19",
+		ttsVoiceId: 0,
+		allowedTools: [...TALK_READ_ONLY_TOOLS],
+		vad: {
+			startDb: 9,
+			thresholdDb: undefined,
+			hangoverMs: 500,
+			minSpeechMs: 300,
+			maxUtteranceMs: 30_000,
+			preRollMs: 300,
+		},
+	},
 	onboarding: {
 		completed: false,
 		schemaVersion: VOICE_CONFIG_VERSION,
@@ -171,6 +215,56 @@ function normalizeOnboarding(input: any, fallbackCompleted: boolean): VoiceOnboa
 		lastValidatedAt: typeof input?.lastValidatedAt === "string" ? input.lastValidatedAt : undefined,
 		source: typeof input?.source === "string" ? input.source : fallbackCompleted ? "migration" : undefined,
 		skippedAt: typeof input?.skippedAt === "string" ? input.skippedAt : undefined,
+	};
+}
+
+const TALK_THINKING_LEVELS = new Set<TalkThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+function finiteInRange(value: unknown, fallback: number, min: number, max: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max
+		? value
+		: fallback;
+}
+
+function normalizeToolNames(value: unknown, fallback: string[]): string[] {
+	if (!Array.isArray(value)) return [...fallback];
+	const names = value.filter((name): name is string => typeof name === "string" && name.trim().length > 0);
+	const safeNames = new Set(TALK_READ_ONLY_TOOLS);
+	return [...new Set(names.map((name) => name.trim()).filter((name) => safeNames.has(name)))];
+}
+
+function normalizeTalkConfig(input: any): ContinuousTalkConfig {
+	const defaults = DEFAULT_CONFIG.talk;
+	const rawVad = input?.vad;
+	return {
+		modelProvider: typeof input?.modelProvider === "string" && input.modelProvider.trim()
+			? input.modelProvider.trim()
+			: undefined,
+		modelId: typeof input?.modelId === "string" && input.modelId.trim()
+			? input.modelId.trim()
+			: undefined,
+		thinkingLevel: TALK_THINKING_LEVELS.has(input?.thinkingLevel)
+			? input.thinkingLevel
+			: defaults.thinkingLevel,
+		sttModel: typeof input?.sttModel === "string" && input.sttModel.trim()
+			? input.sttModel.trim()
+			: defaults.sttModel,
+		ttsModel: typeof input?.ttsModel === "string" && input.ttsModel.trim()
+			? input.ttsModel.trim()
+			: defaults.ttsModel,
+		ttsVoiceId: finiteInRange(input?.ttsVoiceId, defaults.ttsVoiceId, 0, 10_000),
+		allowedTools: normalizeToolNames(input?.allowedTools, defaults.allowedTools),
+		vad: {
+			startDb: finiteInRange(rawVad?.startDb, defaults.vad.startDb, 1, 40),
+			thresholdDb: typeof rawVad?.thresholdDb === "number" && Number.isFinite(rawVad.thresholdDb)
+				&& rawVad.thresholdDb >= -70 && rawVad.thresholdDb <= 0
+				? rawVad.thresholdDb
+				: undefined,
+			hangoverMs: finiteInRange(rawVad?.hangoverMs, defaults.vad.hangoverMs, 200, 3_000),
+			minSpeechMs: finiteInRange(rawVad?.minSpeechMs, defaults.vad.minSpeechMs, 100, 3_000),
+			maxUtteranceMs: finiteInRange(rawVad?.maxUtteranceMs, defaults.vad.maxUtteranceMs, 1_000, 120_000),
+			preRollMs: finiteInRange(rawVad?.preRollMs, defaults.vad.preRollMs, 0, 2_000),
+		},
 	};
 }
 
@@ -235,6 +329,7 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		ttsOnboardingShown: typeof rawVoice.ttsOnboardingShown === "boolean"
 			? rawVoice.ttsOnboardingShown
 			: false,
+		talk: normalizeTalkConfig(rawVoice.talk),
 		onboarding: normalizeOnboarding(rawVoice.onboarding, fallbackCompleted),
 	};
 }

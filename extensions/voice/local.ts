@@ -782,12 +782,20 @@ export function abortLocalSession(session: LocalSession | null): void {
 
 // ─── In-process transcription via sherpa-onnx ────────────────────────────────
 
-/**
- * Transcribe PCM audio using sherpa-onnx in-process.
- * Auto-downloads model on first use.
- */
-async function transcribeInProcess(pcmData: Buffer, config: VoiceConfig): Promise<string> {
-	const { initSherpa, isSherpaAvailable, getSherpaError, getOrCreateRecognizer, transcribeBuffer } = await import("./sherpa-engine");
+// OfflineRecognizer.decodeAsync() is not documented as safe for concurrent
+// streams. Serialize all local callers so a stopped /talk decode cannot race a
+// new hands-free turn or ordinary local dictation through the shared cache.
+let inProcessTranscriptionTail: Promise<void> = Promise.resolve();
+
+function withInProcessTranscriptionLock<T>(operation: () => Promise<T>): Promise<T> {
+	const result = inProcessTranscriptionTail.catch(() => {}).then(operation);
+	inProcessTranscriptionTail = result.then(() => {}, () => {});
+	return result;
+}
+
+/** Resolve and cache the sherpa recognizer used by local batch and /talk STT. */
+async function getInProcessRecognizer(config: VoiceConfig): Promise<any> {
+	const { initSherpa, isSherpaAvailable, getSherpaError, getOrCreateRecognizer } = await import("./sherpa-engine");
 	const { ensureModelDownloaded } = await import("./model-download");
 
 	// Initialize sherpa if needed
@@ -808,9 +816,27 @@ async function transcribeInProcess(pcmData: Buffer, config: VoiceConfig): Promis
 		model.sizeBytes,
 	);
 
-	// Create/reuse recognizer and transcribe
-	const recognizer = getOrCreateRecognizer(model, modelDir, config.language || "en");
-	return transcribeBuffer(pcmData, recognizer);
+	return getOrCreateRecognizer(model, modelDir, config.language || "en");
+}
+
+/** Load and cache the configured local recognizer before the first utterance. */
+export async function prepareLocalTranscriber(config: VoiceConfig): Promise<void> {
+	await withInProcessTranscriptionLock(async () => {
+		await getInProcessRecognizer(config);
+	});
+}
+
+/** Transcribe one raw 16 kHz mono s16le utterance with the configured local model. */
+export async function transcribeLocalPcm(pcmData: Buffer, config: VoiceConfig): Promise<string> {
+	return withInProcessTranscriptionLock(async () => {
+		const { transcribeBuffer } = await import("./sherpa-engine");
+		const recognizer = await getInProcessRecognizer(config);
+		return transcribeBuffer(pcmData, recognizer);
+	});
+}
+
+async function transcribeInProcess(pcmData: Buffer, config: VoiceConfig): Promise<string> {
+	return transcribeLocalPcm(pcmData, config);
 }
 
 /** Check if a local transcription server is reachable. */

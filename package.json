@@ -1,7 +1,7 @@
 {
   "name": "@codexstar/pi-listen",
   "version": "7.2.2",
-  "description": "Voice in + voice out for Pi CLI — hold-to-talk STT (Deepgram or 19 offline models) plus TTS (Kitten Nano, Piper, Kokoro, or Deepgram Aura)",
+  "description": "Voice in + voice out for Pi CLI — hold-to-talk or hands-free local conversation with offline STT and TTS",
   "type": "module",
   "keywords": [
     "pi-package",

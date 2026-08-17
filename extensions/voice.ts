@@ -86,10 +86,12 @@ import { TtsPlaybackIndicator } from "./voice/tts-playback-indicator";
 import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS } from "./voice/deepgram";
 import {
 	startLocalSession, stopLocalSession, abortLocalSession,
+	prepareLocalTranscriber, transcribeLocalPcm,
 	checkLocalServer, LOCAL_MODELS, DEFAULT_LOCAL_ENDPOINT,
 	getLanguagesForLocalModel, isLanguageSupportedByModel, localLanguageDisplayName,
 	type LocalSession,
 } from "./voice/local";
+import { createTalkMode } from "./voice/talk-mode";
 
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -422,7 +424,7 @@ function startStreamingSession(
 		recProc.stdout?.on("data", (chunk: Buffer) => {
 			if (ws.readyState === WebSocket.OPEN) {
 				session.hadAudioData = true;
-				try { ws.send(chunk); } catch {}
+				try { ws.send(Uint8Array.from(chunk)); } catch {}
 				// Feed audio data to level meter for reactive waveform
 				updateAudioLevel(chunk);
 				// Start stale-session watchdog on first audio chunk
@@ -719,6 +721,7 @@ export default function (pi: ExtensionAPI) {
 	// ─── Continuous Dictation Mode ───────────────────────────────────────────
 
 	let dictationMode = false;
+	let talkMode: ReturnType<typeof createTalkMode> | null = null;
 
 	// ─── Sound Feedback ──────────────────────────────────────────────────────
 
@@ -1137,6 +1140,10 @@ export default function (pi: ExtensionAPI) {
 	async function startVoiceRecording(): Promise<boolean> {
 		voiceDebug("startVoiceRecording called", { voiceState, hasUI: !!ctx?.hasUI, starting: _startingRecording });
 		if (!ctx?.hasUI) return false;
+		if (talkMode?.isEnabled()) {
+			ctx.ui.notify("Hands-free talk mode owns the microphone. Use /talk off before starting dictation.", "warning");
+			return false;
+		}
 		if (_startingRecording) return false; // Prevent overlapping starts during corruption guard sleep
 		_startingRecording = true;
 
@@ -2104,6 +2111,9 @@ export default function (pi: ExtensionAPI) {
 		// inside voiceCleanup (e.g. a child process kill EPERM under load) must
 		// not abort handler execution and leave ctx unassigned.
 		if (!isStartup) {
+			try { await talkMode?.disable(ctx ?? startCtx, { notify: false, awaitTranscription: true }); } catch (err) {
+				voiceDebug("talk cleanup threw during session_start", { error: String(err) });
+			}
 			try { voiceCleanup(); } catch (err) {
 				voiceDebug("voiceCleanup threw during session_start", { error: String(err) });
 			}
@@ -2201,6 +2211,9 @@ export default function (pi: ExtensionAPI) {
 		// versions whose replacement path may not await. The try/catch is so a
 		// throw inside voiceCleanup (e.g. a child process kill EPERM under load)
 		// can't leak ctx or skip the recognizer cache clear.
+		try { await talkMode?.disable(ctx ?? undefined, { notify: false, awaitTranscription: true }); } catch (err) {
+			voiceDebug("talk cleanup threw during shutdown", { error: String(err) });
+		}
 		try { voiceCleanup(); } catch (err) {
 			voiceDebug("voiceCleanup threw during shutdown", { error: String(err) });
 		}
@@ -2324,6 +2337,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function maybeSpeakNew(messageId: string, fullText: string, isFinal: boolean): Promise<void> {
+		if (talkMode?.suppressesGeneralSpeech()) return;
 		if (!config.ttsEnabled || !config.ttsAutoSpeak) return;
 		// Don't speak while STT is hot — feedback loop hazard.
 		if (voiceState === "warmup" || voiceState === "recording" || voiceState === "finalizing") return;
@@ -2427,6 +2441,7 @@ export default function (pi: ExtensionAPI) {
 	// it doesn't double-speak when message_update already covered the
 	// content.
 	pi.on("turn_end", async (event, _evtCtx) => {
+		if (talkMode?.suppressesGeneralSpeech()) return;
 		if (!config.ttsEnabled || !config.ttsAutoSpeak) return;
 		const message = (event as any)?.message;
 		if (!message || message.role !== "assistant") return;
@@ -3109,6 +3124,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function runSpeak(cmdCtx: ExtensionCommandContext | ExtensionContext, text: string, opts: { forceEnabled?: boolean } = {}): Promise<void> {
+		if (talkMode?.isEnabled()) {
+			cmdCtx.ui.notify("Talk mode owns speech playback. Use /talk off before /voice-speak.", "warning");
+			return;
+		}
 		// `forceEnabled` lets /voice-speak-test bypass the gate without
 		// mutating shared config. The previous mutate-snapshot-restore
 		// pattern raced against /voice-speak-toggle and could clobber the
@@ -3192,6 +3211,152 @@ export default function (pi: ExtensionAPI) {
 			if (activeSpeak === controller) activeSpeak = null;
 		}
 	}
+
+	// ─── Hands-free /talk mode ─────────────────────────────────────────────
+	//
+	// /talk deliberately uses an audio path separate from hold-to-talk. It
+	// always selects the configured local STT and TTS models, closes capture
+	// before inference/playback, and restores the exact Pi state on exit.
+	const continuousTalk = createTalkMode(pi, {
+		getConfig: () => config,
+		spawnCapture: () => {
+			const audioTool = detectAudioCaptureTool();
+			if (!audioTool) return null;
+			const recProcess = spawn(audioTool.cmd, audioTool.args, { stdio: ["pipe", "pipe", "pipe"] });
+			recProcess.stderr?.on("data", (data: Buffer) => {
+				const message = data.toString().trim();
+				if (!message || message.includes("buffer overrun") || message.includes("Discarding") || message.includes("Last message repeated")) return;
+				voiceDebug(`${audioTool.name} talk capture stderr:`, message);
+			});
+			return { process: recProcess, tool: audioTool.name };
+		},
+		prepare: async (voiceConfig, signal) => {
+			const sttConfig: VoiceConfig = {
+				...voiceConfig,
+				backend: "local",
+				localModel: voiceConfig.talk.sttModel,
+				localEndpoint: undefined,
+			};
+			await prepareLocalTranscriber(sttConfig);
+			if (signal.aborted) throw new DOMException("Talk setup aborted", "AbortError");
+
+			const { ensureTtsModelInstalled, getInstalledTtsModelDir, getTtsModel } = await import("./voice/tts-local-models");
+			const { warmupTts } = await import("./voice/tts-engine");
+			await ensureTtsModelInstalled(voiceConfig.talk.ttsModel, { signal });
+			if (signal.aborted) throw new DOMException("Talk setup aborted", "AbortError");
+			const model = getTtsModel(voiceConfig.talk.ttsModel);
+			const modelDir = getInstalledTtsModelDir(model.id);
+			if (!await warmupTts(model, modelDir, { signal })) {
+				throw new Error(`Could not initialize local TTS model ${model.id}.`);
+			}
+		},
+		transcribe: async (pcm, voiceConfig) => {
+			const sttConfig: VoiceConfig = {
+				...voiceConfig,
+				backend: "local",
+				localModel: voiceConfig.talk.sttModel,
+				localEndpoint: undefined,
+			};
+			return transcribeLocalPcm(pcm, sttConfig);
+		},
+		speak: async (text, voiceConfig, _talkCtx, signal) => {
+			const { speak } = await import("./voice/speak");
+			const { getInstalledTtsModelDir } = await import("./voice/tts-local-models");
+			const talkVoiceConfig: VoiceConfig = {
+				...voiceConfig,
+				ttsEnabled: true,
+				ttsAutoSpeak: false,
+				ttsBackend: "local",
+				ttsLocalModel: voiceConfig.talk.ttsModel,
+				ttsLocalVoiceId: voiceConfig.talk.ttsVoiceId,
+			};
+			await speak({
+				text,
+				config: talkVoiceConfig,
+				signal,
+				resolveModelDir: (modelId) => getInstalledTtsModelDir(modelId),
+			});
+		},
+		onAudioChunk: updateAudioLevel,
+	});
+	talkMode = continuousTalk;
+
+	pi.registerCommand("talk", {
+		description: "Hands-free local conversation: /talk [on|off|status]",
+		getArgumentCompletions: (prefix: string) => ["on", "off", "status"]
+			.filter((item) => item.startsWith(prefix))
+			.map((item) => ({ value: item, label: item })),
+			handler: async (args, cmdCtx) => {
+			ctx = cmdCtx;
+			const subcommand = (args || "").trim().toLowerCase();
+			if (!subcommand) {
+				if (continuousTalk.isEnabled()) await continuousTalk.disable(cmdCtx);
+				else {
+					if (voiceState !== "idle" || dictationMode) {
+						cmdCtx.ui.notify("Stop the current voice recording before starting talk mode.", "warning");
+						return;
+					}
+					abortActiveSpeak();
+					await continuousTalk.enable(cmdCtx);
+				}
+				return;
+			}
+			if (subcommand === "on") {
+				if (voiceState !== "idle" || dictationMode) {
+					cmdCtx.ui.notify("Stop the current voice recording before starting talk mode.", "warning");
+					return;
+				}
+				abortActiveSpeak();
+				await continuousTalk.enable(cmdCtx);
+				return;
+			}
+			if (subcommand === "off") {
+				await continuousTalk.disable(cmdCtx);
+				return;
+			}
+			if (subcommand === "status") {
+				cmdCtx.ui.notify(continuousTalk.statusLines().join("\n"), "info");
+				return;
+			}
+			cmdCtx.ui.notify("Usage: /talk [on|off|status]", "warning");
+		},
+	});
+
+	pi.on("input", async (_event, eventCtx) => {
+		continuousTalk.handleInput(eventCtx);
+		return { action: "continue" as const };
+	});
+
+	pi.on("before_agent_start", async (event, eventCtx) => {
+		const systemPrompt = await continuousTalk.beginAgentRun(event.systemPrompt, eventCtx);
+		if (systemPrompt !== undefined) return { systemPrompt };
+	});
+
+	pi.on("turn_start", async (_event, eventCtx) => {
+		continuousTalk.applyConstraints(eventCtx);
+	});
+
+	pi.on("message_update", async (event) => {
+		continuousTalk.handleMessageUpdate(event);
+	});
+
+	pi.on("message_end", async (event) => {
+		continuousTalk.handleMessageEnd(event);
+	});
+
+	pi.on("turn_end", async (event) => {
+		continuousTalk.handleTurnEnd(event);
+	});
+
+	// agent_settled is the only safe boundary after retries and queued
+	// continuations. Older pi-listen development types predate the event, but
+	// current Pi exposes it at runtime.
+	(pi as any).on("agent_settled", async () => {
+		await continuousTalk.handleAgentSettled();
+	});
+
+	pi.on("tool_call", async (event) => continuousTalk.handleToolCall(event));
+	pi.on("user_bash", async () => continuousTalk.handleUserBash());
 
 	pi.registerCommand("voice-speak", {
 		description: "Speak the given text (text-to-speech)",
