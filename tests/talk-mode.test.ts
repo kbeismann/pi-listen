@@ -151,6 +151,12 @@ function makeHarness(options: Partial<TalkModeDependencies> = {}) {
 }
 
 describe("continuous talk mode", () => {
+	test("uses a soft short-response default that explicit detail requests override", () => {
+		expect(TALK_SYSTEM_PROMPT).toContain("aim for about three or four sentences");
+		expect(TALK_SYSTEM_PROMPT).toContain("This is not a hard limit");
+		expect(TALK_SYSTEM_PROMPT).toContain("explicitly asks for a longer, detailed, or step-by-step answer");
+	});
+
 	test("runs a local hands-free turn and restores the exact Pi state", async () => {
 		const { pi, captures, spoken, context, mode } = makeHarness();
 		const originalTools = [...pi.activeTools];
