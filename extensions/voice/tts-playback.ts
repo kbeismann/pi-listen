@@ -46,6 +46,8 @@ export type PlaybackSource =
 export interface PlayOpts {
 	source: PlaybackSource;
 	signal?: AbortSignal;
+	/** Optional PulseAudio/PipeWire sink used by talk-scoped echo cancellation. */
+	pulseSink?: string;
 	/**
 	 * Override the player command for testing. Production callers leave
 	 * this unset so we pick by `process.platform`.
@@ -98,7 +100,7 @@ export async function play(opts: PlayOpts): Promise<void> {
 		// the write, no point spawning the player.
 		if (signal?.aborted) throw makeAbortError();
 
-		const player = opts.playerOverride ?? choosePlayer();
+		const player = opts.playerOverride ?? choosePlayer(opts.pulseSink);
 		const env = player.env ? { ...process.env, ...player.env(tmpFile) } : process.env;
 
 		const proc: ChildProcess = spawn(player.cmd, player.args(tmpFile), {
@@ -207,6 +209,8 @@ export interface PlaybackStream {
 export interface OpenPlaybackStreamOpts {
 	sampleRate: number;
 	signal?: AbortSignal;
+	/** Optional PulseAudio/PipeWire sink used by talk-scoped echo cancellation. */
+	pulseSink?: string;
 }
 
 /**
@@ -224,7 +228,7 @@ export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream
 	if (signal?.aborted) return null;
 	if (process.platform === "win32") return null;
 
-	const player = pickStreamingPlayer(sampleRate);
+	const player = pickStreamingPlayer(sampleRate, opts.pulseSink);
 	if (!player) return null;
 
 	let cancelled = false;
@@ -402,7 +406,27 @@ function attachSafetyCatch<T>(p: Promise<T>): Promise<T> {
 
 interface StreamingPlayerSpec { cmd: string; args: string[]; }
 
-function pickStreamingPlayer(sampleRate: number): StreamingPlayerSpec | null {
+function pickStreamingPlayer(sampleRate: number, pulseSink?: string): StreamingPlayerSpec | null {
+	// A named sink is part of the echo-cancellation contract. Prefer paplay
+	// because its device selection is explicit instead of relying on an audio
+	// backend chosen internally by ffplay.
+	if (pulseSink && process.platform === "linux" && binaryAvailable("paplay")) {
+		return {
+			cmd: "paplay",
+			args: [
+				"--raw",
+				`--rate=${sampleRate}`,
+				"--format=s16le",
+				"--channels=1",
+				"--client-name=pi-listen-talk",
+				`--device=${pulseSink}`,
+			],
+		};
+	}
+	// Never fall through to a player that may bypass the named AEC sink. The
+	// talk setup requires paplay, and this guard keeps routing safe if the
+	// executable disappears after setup.
+	if (pulseSink) return null;
 	// v7.1.3 — ffplay is the most-reliable streaming PCM consumer on
 	// macOS: it's designed for real-time piped audio and doesn't suffer
 	// the sox-with-CoreAudio underrun where sox exits cleanly after
@@ -505,7 +529,7 @@ interface PlayerSpec {
  * we pick paplay first and let the caller observe spawn failure to retry
  * with aplay. See the inline comment on linuxPlayer below.
  */
-function choosePlayer(): PlayerSpec {
+function choosePlayer(pulseSink?: string): PlayerSpec {
 	switch (process.platform) {
 		case "darwin":
 			return {
@@ -513,7 +537,7 @@ function choosePlayer(): PlayerSpec {
 				args: (p) => [p],
 			};
 		case "linux":
-			return linuxPlayer();
+			return linuxPlayer(pulseSink);
 		case "win32":
 			// PowerShell SoundPlayer reads from $env:PI_SPEAK_PATH so the
 			// path is never interpolated into the command string. Defends
@@ -548,10 +572,10 @@ function choosePlayer(): PlayerSpec {
  * "audio player" option. v6.0 does not surface that knob; v6.1 adds it
  * if field reports show it's needed.
  */
-function linuxPlayer(): PlayerSpec {
+function linuxPlayer(pulseSink?: string): PlayerSpec {
 	return {
 		cmd: "paplay",
-		args: (p) => [p],
+		args: (p) => pulseSink ? [`--device=${pulseSink}`, p] : [p],
 	};
 }
 

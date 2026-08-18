@@ -6,6 +6,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import type { ContinuousTalkConfig, VoiceConfig } from "./config";
 import { createEnergyVad } from "./energy-vad";
+import type { TalkAudioRoute } from "./pipewire-aec";
 import { prepareForSpeech } from "./tts-text-filter";
 
 type TalkContext = ExtensionContext | ExtensionCommandContext;
@@ -18,10 +19,18 @@ export interface TalkCapture {
 
 export interface TalkModeDependencies {
 	getConfig(): VoiceConfig;
-	spawnCapture(): TalkCapture | null;
+	spawnCapture(audioRoute?: TalkAudioRoute): TalkCapture | null;
 	prepare(config: VoiceConfig, signal: AbortSignal): Promise<void>;
+	prepareAudio?(config: VoiceConfig, signal: AbortSignal): Promise<TalkAudioRoute>;
 	transcribe(pcm: Buffer, config: VoiceConfig): Promise<string>;
-	speak(text: string, config: VoiceConfig, ctx: TalkContext, signal: AbortSignal): Promise<void>;
+	speak(
+		text: string,
+		config: VoiceConfig,
+		ctx: TalkContext,
+		signal: AbortSignal,
+		audioRoute?: TalkAudioRoute,
+		onPlaybackStart?: () => void,
+	): Promise<void>;
 	onAudioChunk?(chunk: Buffer): void;
 }
 
@@ -114,8 +123,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		agentActive: false,
 		interruptionInProgress: false,
 		pendingBargeTurn: false,
+		bargeInGuardUntil: 0,
 		generalSpeechSuppressed: false,
 		config: undefined as VoiceConfig | undefined,
+		audioRoute: undefined as TalkAudioRoute | undefined,
 		ctx: undefined as TalkContext | undefined,
 		capture: undefined as TalkCapture | undefined,
 		captureDataHandler: undefined as ((chunk: Buffer) => void) | undefined,
@@ -150,7 +161,9 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	}
 
 	function bargeInEnabled(): boolean {
-		return talkConfig().bargeIn.mode === "headphones";
+		const mode = talkConfig().bargeIn.mode;
+		if (mode === "headphones") return true;
+		return mode === "pipewire-aec" && state.audioRoute?.echoCancelled === true;
 	}
 
 	function cancelSpeechQueue(): void {
@@ -159,12 +172,37 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	}
 
 	function interruptForBargeIn(): void {
-		if (!bargeInEnabled() || !state.agentActive || state.interruptionInProgress) return;
+		if (
+			!bargeInEnabled()
+			|| Date.now() < state.bargeInGuardUntil
+			|| !state.agentActive
+			|| state.interruptionInProgress
+		) return;
 		state.interruptionInProgress = true;
 		if (state.currentRun) state.currentRun.acceptingEvents = false;
 		cancelSpeechQueue();
 		try { (state.ctx as any)?.abort?.(); } catch {}
 		setPhase("hearing");
+	}
+
+	function handlePlaybackStart(): void {
+		if (talkConfig().bargeIn.mode !== "pipewire-aec" || !state.audioRoute?.echoCancelled) return;
+		state.bargeInGuardUntil = Date.now() + talkConfig().bargeIn.guardMs;
+		state.vad?.reset();
+	}
+
+	async function closeAudioRoute(ctx?: TalkContext): Promise<boolean> {
+		const route = state.audioRoute;
+		state.bargeInGuardUntil = 0;
+		if (!route) return true;
+		try {
+			await route.close();
+			if (state.audioRoute === route) state.audioRoute = undefined;
+			return true;
+		} catch (error) {
+			notify(ctx, `Could not remove the /talk audio route: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			return false;
+		}
 	}
 
 	function effectiveAllowedTools(config: ContinuousTalkConfig): string[] {
@@ -220,6 +258,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		while (offset + frameBytes <= combined.length) {
 			const frame = combined.subarray(offset, offset + frameBytes);
 			offset += frameBytes;
+			if (Date.now() < state.bargeInGuardUntil) continue;
 			for (const event of state.vad.pushFrame(frame)) {
 				if (event.type === "speech_start") setPhase("hearing");
 				if (event.type === "speech_confirmed") interruptForBargeIn();
@@ -243,7 +282,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		const epoch = state.lifecycleEpoch;
 		let capture: TalkCapture | null;
 		try {
-			capture = dependencies.spawnCapture();
+			capture = dependencies.spawnCapture(state.audioRoute);
 		} catch (error) {
 			if (options.stopModeOnFailure !== false) {
 				void failAndStop(error instanceof Error ? error : new Error(String(error)));
@@ -378,6 +417,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			notify(ctx, "Talk mode is already on.");
 			return false;
 		}
+		if (state.audioRoute && !await closeAudioRoute(ctx)) {
+			notify(ctx, "Talk mode cannot restart until its previous PipeWire route is removed.", "error");
+			return false;
+		}
 		if (typeof (ctx as any).isIdle === "function" && !(ctx as any).isIdle()) {
 			notify(ctx, "Waiting for the current agent turn before starting talk mode.");
 			await (ctx as any).waitForIdle?.();
@@ -400,6 +443,28 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			if (state.lifecycleEpoch !== epoch || state.prepareAbort.signal.aborted) throw makeAbortError();
 			await dependencies.prepare(state.config, state.prepareAbort.signal);
 			if (state.lifecycleEpoch !== epoch || state.prepareAbort.signal.aborted) throw makeAbortError();
+			if (state.config.talk.bargeIn.mode === "pipewire-aec") {
+				try {
+					if (!dependencies.prepareAudio) throw new Error("The PipeWire audio adapter is unavailable.");
+					state.audioRoute = await dependencies.prepareAudio(state.config, state.prepareAbort.signal);
+				} catch (error) {
+					if ((error as Error)?.name === "AbortError") throw error;
+					const cleanupRoute = (error as { cleanupRoute?: TalkAudioRoute })?.cleanupRoute;
+					if (cleanupRoute?.echoCancelled && typeof cleanupRoute.close === "function") {
+						state.audioRoute = cleanupRoute;
+					}
+					if (!await closeAudioRoute(ctx)) {
+						// Do not enter fallback while an incompletely removed AEC route can
+						// still own virtual devices. Keep the handle for /talk off to retry.
+						throw error;
+					}
+					notify(
+						ctx,
+						`PipeWire echo cancellation is unavailable; /talk will use speaker-safe playback. ${error instanceof Error ? error.message : String(error)}`,
+						"warning",
+					);
+				}
+			}
 			await switchToTalkModel(ctx, state.config.talk);
 			if (state.lifecycleEpoch !== epoch) throw makeAbortError();
 			state.enabled = true;
@@ -413,6 +478,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		} catch (error) {
 			state.enabled = false;
 			stopCapture("SIGKILL");
+			await closeAudioRoute(ctx);
 			await restorePiState(ctx);
 			state.targetModel = undefined;
 			setPhase("off", ctx);
@@ -431,7 +497,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	): Promise<boolean> {
 		const wasActive = state.enabled || state.phase === "starting" || state.phase === "error";
 		const hadPendingRestore = state.snapshotTaken;
-		if (!wasActive && !hadPendingRestore && state.phase === "off" && !(options.awaitTranscription && state.transcription)) {
+		const hadAudioRoute = state.audioRoute !== undefined;
+		if (!wasActive && !hadPendingRestore && !hadAudioRoute && state.phase === "off" && !(options.awaitTranscription && state.transcription)) {
 			if (options.notify !== false) notify(ctx, "Talk mode is already off.");
 			return false;
 		}
@@ -440,6 +507,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.agentActive = false;
 		state.interruptionInProgress = false;
 		state.pendingBargeTurn = false;
+		state.bargeInGuardUntil = 0;
 		setPhase("stopping", ctx);
 		state.prepareAbort?.abort();
 		cancelSpeechQueue();
@@ -454,6 +522,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			try { (ctx as any).abort?.(); } catch {}
 			try { await (ctx as any).waitForIdle?.(); } catch {}
 		}
+		await closeAudioRoute(ctx);
 		state.currentRun = undefined;
 		state.generalSpeechSuppressed = false;
 		const restored = await restorePiState(ctx);
@@ -477,6 +546,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.agentActive = talkScoped;
 		state.interruptionInProgress = false;
 		state.pendingBargeTurn = false;
+		state.bargeInGuardUntil = 0;
 		state.generalSpeechSuppressed = talkScoped;
 		state.messageStreams.clear();
 		if (!talkScoped) return undefined;
@@ -541,7 +611,14 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			state.speechAbort = controller;
 			setPhase("speaking");
 			try {
-				await dependencies.speak(text, state.config, state.ctx, controller.signal);
+				await dependencies.speak(
+					text,
+					state.config,
+					state.ctx,
+					controller.signal,
+					state.audioRoute,
+					handlePlaybackStart,
+				);
 			} catch (error) {
 				if ((error as Error)?.name !== "AbortError" && speechEpoch === state.speechEpoch && runIsCurrent(runId, lifecycleEpoch)) {
 					notify(state.ctx, `Talk speech failed: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -648,13 +725,16 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 
 	function statusLines(): string[] {
 		const config = state.config?.talk ?? dependencies.getConfig().talk;
+		const bargeInStatus = state.enabled && config.bargeIn.mode === "pipewire-aec" && !state.audioRoute?.echoCancelled
+			? "off (PipeWire fallback)"
+			: config.bargeIn.mode;
 		return [
 			`Talk mode: ${state.enabled ? state.phase : "off"}`,
 			`STT: local ${config.sttModel}`,
 			`TTS: local ${config.ttsModel}, voice ${config.ttsVoiceId}`,
 			`model: ${config.modelProvider && config.modelId ? `${config.modelProvider}/${config.modelId}` : "current"}`,
 			`thinking: ${config.thinkingLevel}`,
-			`barge-in: ${config.bargeIn.mode}`,
+			`barge-in: ${bargeInStatus}`,
 			`endpoint silence: ${config.vad.hangoverMs} ms`,
 		];
 	}

@@ -24,7 +24,7 @@ export interface VoiceOnboardingState {
 export type VoiceBackend = "deepgram" | "local";
 
 export type TalkThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export type TalkBargeInMode = "off" | "headphones";
+export type TalkBargeInMode = "off" | "headphones" | "pipewire-aec";
 export const TALK_READ_ONLY_TOOLS = Object.freeze(["read", "grep", "find", "ls"]);
 
 export interface ContinuousTalkConfig {
@@ -42,6 +42,7 @@ export interface ContinuousTalkConfig {
 	bargeIn: {
 		mode: TalkBargeInMode;
 		minSpeechMs: number;
+		guardMs: number;
 	};
 	/** Energy-VAD endpointing. Lower hangover is faster but can split hesitant speech. */
 	vad: {
@@ -182,6 +183,7 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 		bargeIn: {
 			mode: "off",
 			minSpeechMs: 250,
+			guardMs: 500,
 		},
 		vad: {
 			startDb: 9,
@@ -229,7 +231,7 @@ function normalizeOnboarding(input: any, fallbackCompleted: boolean): VoiceOnboa
 }
 
 const TALK_THINKING_LEVELS = new Set<TalkThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const TALK_BARGE_IN_MODES = new Set<TalkBargeInMode>(["off", "headphones"]);
+const TALK_BARGE_IN_MODES = new Set<TalkBargeInMode>(["off", "headphones", "pipewire-aec"]);
 
 function finiteInRange(value: unknown, fallback: number, min: number, max: number): number {
 	return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max
@@ -271,6 +273,7 @@ function normalizeTalkConfig(input: any): ContinuousTalkConfig {
 				? rawBargeIn.mode
 				: defaults.bargeIn.mode,
 			minSpeechMs: finiteInRange(rawBargeIn?.minSpeechMs, defaults.bargeIn.minSpeechMs, 100, 1_000),
+			guardMs: finiteInRange(rawBargeIn?.guardMs, defaults.bargeIn.guardMs, 0, 3_000),
 		},
 		vad: {
 			startDb: finiteInRange(rawVad?.startDb, defaults.vad.startDb, 1, 40),

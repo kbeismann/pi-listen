@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { DEFAULT_CONFIG, type VoiceConfig } from "../extensions/voice/config";
+import type { TalkAudioRoute } from "../extensions/voice/pipewire-aec";
 import { createTalkMode, TALK_SYSTEM_PROMPT, type TalkCapture, type TalkModeDependencies } from "../extensions/voice/talk-mode";
 
 class FakeCaptureProcess extends EventEmitter {
@@ -122,10 +123,12 @@ function makeHarness(options: Partial<TalkModeDependencies> = {}) {
 	const pi = new MockPi();
 	const config = makeConfig();
 	const captures: FakeCaptureProcess[] = [];
+	const captureRoutes: Array<TalkAudioRoute | undefined> = [];
 	const spoken: string[] = [];
 	const dependencies: TalkModeDependencies = {
 		getConfig: () => config,
-		spawnCapture: () => {
+		spawnCapture: (audioRoute) => {
+			captureRoutes.push(audioRoute);
 			const process = new FakeCaptureProcess();
 			captures.push(process);
 			return { process, tool: "fake" } as unknown as TalkCapture;
@@ -137,7 +140,7 @@ function makeHarness(options: Partial<TalkModeDependencies> = {}) {
 	};
 	const context = makeContext(pi);
 	const mode = createTalkMode(pi as any, dependencies);
-	return { pi, config, captures, spoken, context, mode };
+	return { pi, config, captures, captureRoutes, spoken, context, mode };
 }
 
 describe("continuous talk mode", () => {
@@ -339,5 +342,98 @@ describe("continuous talk mode", () => {
 		expect(harness.context.abortCount).toBe(0);
 		expect(harness.pi.sentMessages).toEqual([]);
 		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("PipeWire AEC keeps its routed microphone open through speech", async () => {
+		let closeCount = 0;
+		const route: TalkAudioRoute = {
+			mode: "pipewire-aec",
+			echoCancelled: true,
+			captureSource: "talk_aec_source",
+			playbackSink: "talk_aec_sink",
+			close: async () => { closeCount += 1; },
+		};
+		const harness = makeHarness({ prepareAudio: async () => route });
+		harness.config.talk.bargeIn.mode = "pipewire-aec";
+		harness.config.talk.bargeIn.guardMs = 0;
+
+		await harness.mode.enable(harness.context as any);
+		expect(harness.captureRoutes).toEqual([route]);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "AEC-routed response." }] },
+		});
+		await harness.mode.handleAgentSettled();
+
+		expect(harness.captures[0]!.killedWith).toBeUndefined();
+		expect(harness.mode.statusLines()).toContain("barge-in: pipewire-aec");
+		await harness.mode.disable(harness.context as any, { notify: false });
+		expect(closeCount).toBe(1);
+	});
+
+	test("PipeWire AEC failure falls back to speaker-safe playback", async () => {
+		const harness = makeHarness({
+			prepareAudio: async () => { throw new Error("echo module missing"); },
+		});
+		harness.config.talk.bargeIn.mode = "pipewire-aec";
+
+		expect(await harness.mode.enable(harness.context as any)).toBe(true);
+		expect(harness.mode.statusLines()).toContain("barge-in: off (PipeWire fallback)");
+		expect(harness.context.notifications.some(({ message }) => message.includes("speaker-safe playback"))).toBe(true);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "Fallback response." }] },
+		});
+		await harness.mode.handleAgentSettled();
+
+		expect(harness.captures[0]!.killedWith).toBe("SIGKILL");
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("retries PipeWire route cleanup after talk mode stops", async () => {
+		let closeCount = 0;
+		const route: TalkAudioRoute = {
+			mode: "pipewire-aec",
+			echoCancelled: true,
+			captureSource: "talk_aec_source",
+			playbackSink: "talk_aec_sink",
+			close: async () => {
+				closeCount += 1;
+				if (closeCount === 1) throw new Error("temporary unload failure");
+			},
+		};
+		const harness = makeHarness({ prepareAudio: async () => route });
+		harness.config.talk.bargeIn.mode = "pipewire-aec";
+		await harness.mode.enable(harness.context as any);
+
+		await harness.mode.disable(harness.context as any, { notify: false });
+		expect(harness.mode._state.audioRoute).toBe(route);
+		await harness.mode.disable(harness.context as any, { notify: false });
+		expect(harness.mode._state.audioRoute).toBeUndefined();
+		expect(closeCount).toBe(2);
+	});
+
+	test("does not fall back while partial PipeWire setup still needs cleanup", async () => {
+		let closeCount = 0;
+		const route: TalkAudioRoute = {
+			mode: "pipewire-aec",
+			echoCancelled: true,
+			captureSource: "partial_aec_source",
+			playbackSink: "partial_aec_sink",
+			close: async () => {
+				closeCount += 1;
+				if (closeCount <= 2) throw new Error("persistent unload failure");
+			},
+		};
+		const setupError = Object.assign(new Error("partial setup failed"), { cleanupRoute: route });
+		const harness = makeHarness({ prepareAudio: async () => { throw setupError; } });
+		harness.config.talk.bargeIn.mode = "pipewire-aec";
+
+		expect(await harness.mode.enable(harness.context as any)).toBe(false);
+		expect(harness.captures).toHaveLength(0);
+		expect(harness.mode._state.audioRoute).toBe(route);
+		await harness.mode.disable(harness.context as any, { notify: false });
+		expect(harness.mode._state.audioRoute).toBeUndefined();
+		expect(closeCount).toBe(3);
 	});
 });

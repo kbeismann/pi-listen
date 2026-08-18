@@ -92,6 +92,7 @@ import {
 	type LocalSession,
 } from "./voice/local";
 import { createTalkMode } from "./voice/talk-mode";
+import { createPipeWireEchoCancellation } from "./voice/pipewire-aec";
 
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -3215,12 +3216,32 @@ export default function (pi: ExtensionAPI) {
 	// ─── Hands-free /talk mode ─────────────────────────────────────────────
 	//
 	// /talk deliberately uses an audio path separate from hold-to-talk. It
-	// always selects the configured local STT and TTS models, closes capture
-	// before inference/playback, and restores the exact Pi state on exit.
+	// always selects the configured local STT and TTS models and restores the
+	// exact Pi state on exit. Optional PipeWire routing exists only for the
+	// /talk lifecycle and is removed when the mode stops.
 	const continuousTalk = createTalkMode(pi, {
 		getConfig: () => config,
-		spawnCapture: () => {
-			const audioTool = detectAudioCaptureTool();
+		spawnCapture: (audioRoute) => {
+			let audioTool: AudioCaptureTool | null;
+			if (audioRoute?.captureSource) {
+				if (process.platform !== "linux" || !commandExists("ffmpeg")) return null;
+				audioTool = {
+					name: "ffmpeg-pipewire-aec",
+					cmd: "ffmpeg",
+					args: [
+						"-f", "pulse",
+						"-i", audioRoute.captureSource,
+						"-ac", String(CHANNELS),
+						"-ar", String(SAMPLE_RATE),
+						"-sample_fmt", "s16",
+						"-f", "s16le",
+						"-loglevel", "error",
+						"pipe:1",
+					],
+				};
+			} else {
+				audioTool = detectAudioCaptureTool();
+			}
 			if (!audioTool) return null;
 			const recProcess = spawn(audioTool.cmd, audioTool.args, { stdio: ["pipe", "pipe", "pipe"] });
 			recProcess.stderr?.on("data", (data: Buffer) => {
@@ -3229,6 +3250,15 @@ export default function (pi: ExtensionAPI) {
 				voiceDebug(`${audioTool.name} talk capture stderr:`, message);
 			});
 			return { process: recProcess, tool: audioTool.name };
+		},
+		prepareAudio: async (_voiceConfig, signal) => {
+			if (!commandExists("ffmpeg")) {
+				throw new Error("PipeWire barge-in requires ffmpeg to select the echo-cancelled microphone.");
+			}
+			if (!commandExists("paplay")) {
+				throw new Error("PipeWire barge-in requires paplay to select the echo-cancellation playback sink.");
+			}
+			return createPipeWireEchoCancellation({ signal });
 		},
 		prepare: async (voiceConfig, signal) => {
 			const sttConfig: VoiceConfig = {
@@ -3259,7 +3289,7 @@ export default function (pi: ExtensionAPI) {
 			};
 			return transcribeLocalPcm(pcm, sttConfig);
 		},
-		speak: async (text, voiceConfig, _talkCtx, signal) => {
+		speak: async (text, voiceConfig, _talkCtx, signal, audioRoute, onPlaybackStart) => {
 			const { speak } = await import("./voice/speak");
 			const { getInstalledTtsModelDir } = await import("./voice/tts-local-models");
 			const talkVoiceConfig: VoiceConfig = {
@@ -3274,6 +3304,8 @@ export default function (pi: ExtensionAPI) {
 				text,
 				config: talkVoiceConfig,
 				signal,
+				pulseSink: audioRoute?.playbackSink,
+				onPlaybackStart,
 				resolveModelDir: (modelId) => getInstalledTtsModelDir(modelId),
 			});
 		},

@@ -166,7 +166,7 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 `/talk on` starts an automatic conversation loop. Speak normally; energy-based voice activity detection decides when the utterance ends, Parakeet transcribes it locally, Pi answers, and Kokoro speaks the answer locally. The microphone listens while Pi is thinking and between turns, so no key is held or pressed. `/talk off` immediately stops capture and playback.
 
-Talk mode defaults to speaker-safe playback. It closes microphone capture before Kokoro plays audio, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback, and sustained speech cancels both speech and the current model run before the new utterance is submitted. Microphone audio never leaves the machine; only the resulting text is sent to the configured Pi model.
+Talk mode defaults to speaker-safe playback. It closes microphone capture before Kokoro plays audio, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback, and sustained speech cancels both speech and the current model run before the new utterance is submitted. On Linux, `pipewire-aec` instead creates a temporary WebRTC echo-cancellation source and sink for `/talk`, allowing the same interruption behavior over speakers. If the route cannot be created, talk mode reports the failure and falls back to speaker-safe playback. Microphone audio never leaves the machine; only the resulting text is sent to the configured Pi model.
 
 The mode is isolated from ordinary Pi turns:
 
@@ -191,7 +191,8 @@ The defaults use `parakeet-v3`, `kokoro-en-v0_19`, and low thinking. Set a dedic
       "allowedTools": ["read", "grep", "find", "ls"],
       "bargeIn": {
         "mode": "off",
-        "minSpeechMs": 250
+        "minSpeechMs": 250,
+        "guardMs": 500
       },
       "vad": {
         "startDb": 9,

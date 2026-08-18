@@ -57,6 +57,10 @@ export interface SpeakOpts {
 	resolveModelDir?: (modelId: string) => string;
 	/** Override the play() function — used by tests to capture audio. */
 	playAudio?: typeof play;
+	/** Route playback through a talk-scoped PulseAudio/PipeWire sink. */
+	pulseSink?: string;
+	/** Called once when audio is about to enter the playback device. */
+	onPlaybackStart?: () => void;
 }
 
 /**
@@ -89,6 +93,12 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 	}
 
 	const playAudio = opts.playAudio ?? play;
+	let playbackStarted = false;
+	const notifyPlaybackStart = () => {
+		if (playbackStarted) return;
+		playbackStarted = true;
+		opts.onPlaybackStart?.();
+	};
 
 	// v7.1.3 — pipelined synth + true streaming playback when sox/paplay
 	// is available. Two layers:
@@ -150,9 +160,10 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 	// conditions vs ~1-2s for REST/file path.
 	if (backend === "deepgram" && config.ttsDeepgramStreaming === true) {
 		const dgSampleRate = 24000;
-		const sink = openPlaybackStream({ sampleRate: dgSampleRate, signal });
+		const sink = openPlaybackStream({ sampleRate: dgSampleRate, signal, pulseSink: opts.pulseSink });
 		if (sink) {
 			try {
+				notifyPlaybackStart();
 				const voiceId = config.ttsDeepgramVoiceId || "aura-asteria-en";
 				for (const chunk of chunks) {
 					if (signal?.aborted) throw makeAbortError();
@@ -192,9 +203,10 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 			// WAV chunks (Deepgram REST) cannot stream and fall through.
 			if ("samples" in audio && audio.sampleRate) {
 				if (stream === null && i === 0) {
-					stream = openPlaybackStream({ sampleRate: audio.sampleRate, signal });
+					stream = openPlaybackStream({ sampleRate: audio.sampleRate, signal, pulseSink: opts.pulseSink });
 				}
 				if (stream) {
+					notifyPlaybackStart();
 					// Kick off NEXT chunk's synth BEFORE awaiting the
 					// write — synthesis runs in parallel with stdin
 					// write/drain. writePcm returns a promise that
@@ -211,7 +223,8 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 			if (i + 1 < chunks.length) {
 				nextSynth = synthOne(chunks[i + 1]!);
 			}
-			await playAudio({ source: audio, signal });
+			notifyPlaybackStart();
+			await playAudio({ source: audio, signal, pulseSink: opts.pulseSink });
 			if (signal?.aborted) throw makeAbortError();
 		}
 
