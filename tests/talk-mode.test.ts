@@ -66,6 +66,7 @@ function makeConfig(): VoiceConfig {
 function makeContext(pi: MockPi) {
 	const notifications: Array<{ message: string; level: string }> = [];
 	const statuses = new Map<string, string | undefined>();
+	let abortCount = 0;
 	return {
 		hasUI: true,
 		cwd: "/tmp/project",
@@ -78,6 +79,7 @@ function makeContext(pi: MockPi) {
 			},
 		},
 		isIdle: () => true,
+		abort: () => { abortCount += 1; },
 		waitForIdle: async () => {},
 		ui: {
 			notify(message: string, level: string) { notifications.push({ message, level }); },
@@ -85,6 +87,7 @@ function makeContext(pi: MockPi) {
 		},
 		notifications,
 		statuses,
+		get abortCount() { return abortCount; },
 	};
 }
 
@@ -280,5 +283,61 @@ describe("continuous talk mode", () => {
 		expect(speechAborted).toBe(true);
 		expect(harness.captures).toHaveLength(1);
 		expect(harness.mode.getPhase()).toBe("off");
+	});
+
+	test("headphone barge-in aborts speech and the active model run", async () => {
+		let speechAborted = false;
+		const harness = makeHarness({
+			speak: async (_text, _config, _ctx, signal) => new Promise<void>((_resolve, reject) => {
+				const abort = () => {
+					speechAborted = true;
+					const error = new Error("aborted");
+					error.name = "AbortError";
+					reject(error);
+				};
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			}),
+		});
+		harness.config.talk.bargeIn.mode = "headphones";
+
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleTurnStart(harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "This answer should be interrupted." }] },
+		});
+		await Bun.sleep(5);
+
+		expect(harness.captures[0]!.killedWith).toBeUndefined();
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(10);
+
+		expect(speechAborted).toBe(true);
+		expect(harness.context.abortCount).toBe(1);
+		expect(harness.pi.sentMessages).toEqual([
+			{ text: "hello from the local microphone", options: { deliverAs: "steer" } },
+		]);
+		expect(harness.captures[0]!.killedWith).toBe("SIGKILL");
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("headphone barge-in does not abort audio too short for transcription", async () => {
+		const harness = makeHarness();
+		harness.config.talk.bargeIn.mode = "headphones";
+		harness.config.talk.bargeIn.minSpeechMs = 100;
+		harness.config.talk.vad.minSpeechMs = 300;
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+
+		feedInOddChunks(harness.captures[0]!, Buffer.concat([
+			...Array.from({ length: 8 }, () => toneFrame()),
+			...Array.from({ length: 12 }, () => Buffer.alloc(1_024)),
+		]));
+		await Bun.sleep(10);
+
+		expect(harness.context.abortCount).toBe(0);
+		expect(harness.pi.sentMessages).toEqual([]);
+		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 });

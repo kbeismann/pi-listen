@@ -49,7 +49,15 @@ describe("energy VAD", () => {
 			...Array.from({ length: 12 }, () => silenceFrame()),
 		].flatMap((frame) => vad.pushFrame(frame));
 		expect(events.some((event) => event.type === "discarded")).toBe(true);
+		expect(events.some((event) => event.type === "speech_confirmed")).toBe(false);
 		expect(events.some((event) => event.type === "speech_end")).toBe(false);
+	});
+
+	test("sustained speech emits one confirmation for barge-in", () => {
+		const vad = createEnergyVad({ confirmationMs: 250 });
+		const events = Array.from({ length: 20 }, () => toneFrame())
+			.flatMap((frame) => vad.pushFrame(frame));
+		expect(events.filter((event) => event.type === "speech_confirmed")).toHaveLength(1);
 	});
 
 	test("maximum duration forces an endpoint", () => {

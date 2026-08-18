@@ -3333,7 +3333,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_start", async (_event, eventCtx) => {
-		continuousTalk.applyConstraints(eventCtx);
+		continuousTalk.handleTurnStart(eventCtx);
 	});
 
 	pi.on("message_update", async (event) => {

@@ -46,6 +46,8 @@ describe("loadConfigWithSource", () => {
 		expect(result.config.talk.sttModel).toBe("parakeet-v3");
 		expect(result.config.talk.ttsModel).toBe("kokoro-en-v0_19");
 		expect(result.config.talk.thinkingLevel).toBe("low");
+		expect(result.config.talk.bargeIn.mode).toBe("off");
+		expect(result.config.talk.bargeIn.minSpeechMs).toBe(250);
 		expect(result.config.talk.vad.hangoverMs).toBe(500);
 	});
 
@@ -62,6 +64,7 @@ describe("loadConfigWithSource", () => {
 				ttsModel: "kokoro-en-v0_19",
 				ttsVoiceId: "zero",
 				allowedTools: ["read", "read", 42, "grep", "bash", "write"],
+				bargeIn: { mode: "headphones", minSpeechMs: 50 },
 				vad: { hangoverMs: 50, thresholdDb: -35 },
 			},
 		});
@@ -72,6 +75,8 @@ describe("loadConfigWithSource", () => {
 		expect(talk.thinkingLevel).toBe("low");
 		expect(talk.ttsVoiceId).toBe(0);
 		expect(talk.allowedTools).toEqual(["read", "grep"]);
+		expect(talk.bargeIn.mode).toBe("headphones");
+		expect(talk.bargeIn.minSpeechMs).toBe(250);
 		expect(talk.vad.hangoverMs).toBe(500);
 		expect(talk.vad.thresholdDb).toBe(-35);
 	});

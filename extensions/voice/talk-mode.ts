@@ -111,6 +111,9 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		lifecycleEpoch: 0,
 		runCounter: 0,
 		currentRun: undefined as TalkRun | undefined,
+		agentActive: false,
+		interruptionInProgress: false,
+		pendingBargeTurn: false,
 		generalSpeechSuppressed: false,
 		config: undefined as VoiceConfig | undefined,
 		ctx: undefined as TalkContext | undefined,
@@ -123,6 +126,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		prepareAbort: undefined as AbortController | undefined,
 		transcription: undefined as Promise<void> | undefined,
 		speechAbort: undefined as AbortController | undefined,
+		speechEpoch: 0,
 		speechTail: Promise.resolve(),
 		messageStreams: new Map<string, MessageStreamState>(),
 		previousModel: undefined as any,
@@ -143,6 +147,24 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 
 	function talkConfig(): ContinuousTalkConfig {
 		return state.config?.talk ?? dependencies.getConfig().talk;
+	}
+
+	function bargeInEnabled(): boolean {
+		return talkConfig().bargeIn.mode === "headphones";
+	}
+
+	function cancelSpeechQueue(): void {
+		state.speechEpoch += 1;
+		state.speechAbort?.abort();
+	}
+
+	function interruptForBargeIn(): void {
+		if (!bargeInEnabled() || !state.agentActive || state.interruptionInProgress) return;
+		state.interruptionInProgress = true;
+		if (state.currentRun) state.currentRun.acceptingEvents = false;
+		cancelSpeechQueue();
+		try { (state.ctx as any)?.abort?.(); } catch {}
+		setPhase("hearing");
 	}
 
 	function effectiveAllowedTools(config: ContinuousTalkConfig): string[] {
@@ -200,6 +222,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			offset += frameBytes;
 			for (const event of state.vad.pushFrame(frame)) {
 				if (event.type === "speech_start") setPhase("hearing");
+				if (event.type === "speech_confirmed") interruptForBargeIn();
 				if (event.type === "discarded") setPhase("listening");
 				if (event.type === "speech_end") {
 					stopCapture();
@@ -240,6 +263,9 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			thresholdDb: vadConfig.thresholdDb,
 			hangoverMs: vadConfig.hangoverMs,
 			minSpeechMs: vadConfig.minSpeechMs,
+			// Never abort a model run for audio that normal endpoint validation
+			// would later discard as too short.
+			confirmationMs: Math.max(talkConfig().bargeIn.minSpeechMs, vadConfig.minSpeechMs),
 			maxUtteranceMs: vadConfig.maxUtteranceMs,
 			preRollMs: vadConfig.preRollMs,
 		});
@@ -268,15 +294,19 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			const text = (await dependencies.transcribe(pcm, state.config)).trim();
 			if (!state.enabled || state.lifecycleEpoch !== epoch) return;
 			if (!text) {
+				state.interruptionInProgress = false;
 				setPhase("listening");
 				startCapture();
 				return;
 			}
+			if (state.interruptionInProgress) state.pendingBargeTurn = true;
 			setPhase("thinking");
 			const result = (pi as any).sendUserMessage(text, { deliverAs: "steer" });
 			if (result && typeof result.then === "function") await result;
 		} catch (error) {
 			if (!state.enabled || state.lifecycleEpoch !== epoch) return;
+			state.interruptionInProgress = false;
+			state.pendingBargeTurn = false;
 			notify(state.ctx, `Talk transcription failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 			startCapture();
 		}
@@ -407,9 +437,12 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 		++state.lifecycleEpoch;
 		state.enabled = false;
+		state.agentActive = false;
+		state.interruptionInProgress = false;
+		state.pendingBargeTurn = false;
 		setPhase("stopping", ctx);
 		state.prepareAbort?.abort();
-		state.speechAbort?.abort();
+		cancelSpeechQueue();
 		state.speechAbort = undefined;
 		stopCapture("SIGKILL");
 		state.messageStreams.clear();
@@ -441,10 +474,13 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.runCounter += 1;
 		const talkScoped = state.enabled;
 		state.currentRun = { id: state.runCounter, talkScoped, acceptingEvents: talkScoped };
+		state.agentActive = talkScoped;
+		state.interruptionInProgress = false;
+		state.pendingBargeTurn = false;
 		state.generalSpeechSuppressed = talkScoped;
 		state.messageStreams.clear();
 		if (!talkScoped) return undefined;
-		state.speechAbort?.abort();
+		cancelSpeechQueue();
 		if (state.targetModel && modelKey((ctx as any).model) !== modelKey(state.targetModel)) {
 			try {
 				const changed = await (pi as any).setModel(state.targetModel);
@@ -457,6 +493,23 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		setPhase("thinking", ctx);
 		startCapture(ctx);
 		return `${systemPrompt}\n\n${TALK_SYSTEM_PROMPT}`;
+	}
+
+	function handleTurnStart(ctx: TalkContext): void {
+		if (!state.enabled) return;
+		state.ctx = ctx;
+		state.agentActive = true;
+		if (state.pendingBargeTurn) {
+			state.runCounter += 1;
+			state.currentRun = { id: state.runCounter, talkScoped: true, acceptingEvents: true };
+			state.pendingBargeTurn = false;
+			state.interruptionInProgress = false;
+			state.messageStreams.clear();
+			cancelSpeechQueue();
+		}
+		applyConstraints(ctx);
+		setPhase("thinking", ctx);
+		startCapture(ctx);
 	}
 
 	function ownsCurrentRun(): boolean {
@@ -478,24 +531,24 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 
 	function enqueueSpeech(text: string, runId: number): void {
 		const lifecycleEpoch = state.lifecycleEpoch;
+		const speechEpoch = state.speechEpoch;
 		state.speechTail = state.speechTail.catch(() => {}).then(async () => {
-			if (!runIsCurrent(runId, lifecycleEpoch) || !state.config || !state.ctx) return;
-			// Listening overlaps model inference, but not speaker playback. Closing
-			// capture here preserves the existing feedback-safe behavior while
-			// still allowing corrections during long reasoning delays.
-			stopCapture();
+			if (speechEpoch !== state.speechEpoch || !runIsCurrent(runId, lifecycleEpoch) || !state.config || !state.ctx) return;
+			// Headphone mode keeps capture open so sustained near-end speech can
+			// cancel playback. The default remains feedback-safe half duplex.
+			if (!bargeInEnabled()) stopCapture();
 			const controller = new AbortController();
 			state.speechAbort = controller;
 			setPhase("speaking");
 			try {
 				await dependencies.speak(text, state.config, state.ctx, controller.signal);
 			} catch (error) {
-				if ((error as Error)?.name !== "AbortError" && runIsCurrent(runId, lifecycleEpoch)) {
+				if ((error as Error)?.name !== "AbortError" && speechEpoch === state.speechEpoch && runIsCurrent(runId, lifecycleEpoch)) {
 					notify(state.ctx, `Talk speech failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 				}
 			} finally {
 				if (state.speechAbort === controller) state.speechAbort = undefined;
-				if (runIsCurrent(runId, lifecycleEpoch) && state.currentRun?.acceptingEvents) setPhase("thinking");
+				if (speechEpoch === state.speechEpoch && runIsCurrent(runId, lifecycleEpoch) && state.currentRun?.acceptingEvents) setPhase("thinking");
 			}
 		});
 	}
@@ -558,6 +611,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		const pendingSpeech = state.speechTail;
 		try { await pendingSpeech; } catch {}
 		if (!runIsCurrent(runId, lifecycleEpoch)) return;
+		state.agentActive = false;
 		startCapture();
 	}
 
@@ -600,6 +654,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			`TTS: local ${config.ttsModel}, voice ${config.ttsVoiceId}`,
 			`model: ${config.modelProvider && config.modelId ? `${config.modelProvider}/${config.modelId}` : "current"}`,
 			`thinking: ${config.thinkingLevel}`,
+			`barge-in: ${config.bargeIn.mode}`,
 			`endpoint silence: ${config.vad.hangoverMs} ms`,
 		];
 	}
@@ -608,6 +663,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		enable,
 		disable,
 		beginAgentRun,
+		handleTurnStart,
 		handleMessageUpdate,
 		handleMessageEnd,
 		handleTurnEnd,

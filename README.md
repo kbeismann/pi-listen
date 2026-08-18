@@ -164,9 +164,9 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 ### Hands-free conversation
 
-`/talk on` starts an automatic conversation loop. Speak normally; energy-based voice activity detection decides when the utterance ends, Parakeet transcribes it locally, Pi answers, and Kokoro speaks the answer locally. The microphone starts listening again after playback, so no key is held or pressed between turns. `/talk off` immediately stops capture and playback.
+`/talk on` starts an automatic conversation loop. Speak normally; energy-based voice activity detection decides when the utterance ends, Parakeet transcribes it locally, Pi answers, and Kokoro speaks the answer locally. The microphone listens while Pi is thinking and between turns, so no key is held or pressed. `/talk off` immediately stops capture and playback.
 
-Talk mode is intentionally speaker-safe and half duplex. It closes microphone capture before transcription and keeps it closed while Pi answers and Kokoro plays audio. This prevents the assistant's own voice from becoming the next user utterance without requiring cloud echo cancellation. Microphone audio never leaves the machine; only the resulting text is sent to the configured Pi model.
+Talk mode defaults to speaker-safe playback. It closes microphone capture before Kokoro plays audio, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback, and sustained speech cancels both speech and the current model run before the new utterance is submitted. Microphone audio never leaves the machine; only the resulting text is sent to the configured Pi model.
 
 The mode is isolated from ordinary Pi turns:
 
@@ -189,6 +189,10 @@ The defaults use `parakeet-v3`, `kokoro-en-v0_19`, and low thinking. Set a dedic
       "ttsModel": "kokoro-en-v0_19",
       "ttsVoiceId": 0,
       "allowedTools": ["read", "grep", "find", "ls"],
+      "bargeIn": {
+        "mode": "off",
+        "minSpeechMs": 250
+      },
       "vad": {
         "startDb": 9,
         "hangoverMs": 500,

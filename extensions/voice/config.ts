@@ -24,6 +24,7 @@ export interface VoiceOnboardingState {
 export type VoiceBackend = "deepgram" | "local";
 
 export type TalkThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type TalkBargeInMode = "off" | "headphones";
 export const TALK_READ_ONLY_TOOLS = Object.freeze(["read", "grep", "find", "ls"]);
 
 export interface ContinuousTalkConfig {
@@ -37,6 +38,11 @@ export interface ContinuousTalkConfig {
 	ttsVoiceId: number;
 	/** Read-only tools available while spoken input can trigger turns automatically. */
 	allowedTools: string[];
+	/** Optional headphone-safe interruption while the agent is answering. */
+	bargeIn: {
+		mode: TalkBargeInMode;
+		minSpeechMs: number;
+	};
 	/** Energy-VAD endpointing. Lower hangover is faster but can split hesitant speech. */
 	vad: {
 		startDb: number;
@@ -173,6 +179,10 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 		ttsModel: "kokoro-en-v0_19",
 		ttsVoiceId: 0,
 		allowedTools: [...TALK_READ_ONLY_TOOLS],
+		bargeIn: {
+			mode: "off",
+			minSpeechMs: 250,
+		},
 		vad: {
 			startDb: 9,
 			thresholdDb: undefined,
@@ -219,6 +229,7 @@ function normalizeOnboarding(input: any, fallbackCompleted: boolean): VoiceOnboa
 }
 
 const TALK_THINKING_LEVELS = new Set<TalkThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const TALK_BARGE_IN_MODES = new Set<TalkBargeInMode>(["off", "headphones"]);
 
 function finiteInRange(value: unknown, fallback: number, min: number, max: number): number {
 	return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max
@@ -235,6 +246,7 @@ function normalizeToolNames(value: unknown, fallback: string[]): string[] {
 
 function normalizeTalkConfig(input: any): ContinuousTalkConfig {
 	const defaults = DEFAULT_CONFIG.talk;
+	const rawBargeIn = input?.bargeIn;
 	const rawVad = input?.vad;
 	return {
 		modelProvider: typeof input?.modelProvider === "string" && input.modelProvider.trim()
@@ -254,6 +266,12 @@ function normalizeTalkConfig(input: any): ContinuousTalkConfig {
 			: defaults.ttsModel,
 		ttsVoiceId: finiteInRange(input?.ttsVoiceId, defaults.ttsVoiceId, 0, 10_000),
 		allowedTools: normalizeToolNames(input?.allowedTools, defaults.allowedTools),
+		bargeIn: {
+			mode: TALK_BARGE_IN_MODES.has(rawBargeIn?.mode)
+				? rawBargeIn.mode
+				: defaults.bargeIn.mode,
+			minSpeechMs: finiteInRange(rawBargeIn?.minSpeechMs, defaults.bargeIn.minSpeechMs, 100, 1_000),
+		},
 		vad: {
 			startDb: finiteInRange(rawVad?.startDb, defaults.vad.startDb, 1, 40),
 			thresholdDb: typeof rawVad?.thresholdDb === "number" && Number.isFinite(rawVad.thresholdDb)

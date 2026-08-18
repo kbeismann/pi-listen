@@ -16,6 +16,7 @@ export interface EnergyVadOptions {
 	maxUtteranceMs?: number;
 	preRollMs?: number;
 	startFrames?: number;
+	confirmationMs?: number;
 	endDeltaDb?: number;
 	noiseFloorDb?: number;
 	floorAlpha?: number;
@@ -26,6 +27,7 @@ export interface EnergyVadOptions {
 export type EnergyVadEvent =
 	| { type: "level"; rmsDb: number }
 	| { type: "speech_start" }
+	| { type: "speech_confirmed" }
 	| { type: "speech_end"; pcm: Buffer; durationMs: number; forced: boolean }
 	| { type: "discarded"; durationMs: number; reason: "too-short" };
 
@@ -39,6 +41,7 @@ export const ENERGY_VAD_DEFAULTS = Object.freeze({
 	maxUtteranceMs: 30_000,
 	preRollMs: 300,
 	startFrames: 3,
+	confirmationMs: undefined as number | undefined,
 	endDeltaDb: 3,
 	noiseFloorDb: -50,
 	floorAlpha: 0.05,
@@ -73,9 +76,14 @@ export function createEnergyVad(options: EnergyVadOptions = {}) {
 	const preRollFrames = Math.max(1, Math.ceil(config.preRollMs / frameMs));
 	const hangoverFramesNeeded = Math.max(1, Math.ceil(config.hangoverMs / frameMs));
 	const minSpeechFrames = Math.max(1, Math.ceil(config.minSpeechMs / frameMs));
+	const confirmationFrames = Math.max(
+		config.startFrames,
+		Math.ceil((config.confirmationMs ?? config.minSpeechMs) / frameMs),
+	);
 	const maxUtteranceFrames = Math.max(minSpeechFrames, Math.ceil(config.maxUtteranceMs / frameMs));
 
 	let speaking = false;
+	let speechConfirmed = false;
 	let noiseFloorDb = clamp(config.noiseFloorDb, config.floorMinDb, config.floorMaxDb);
 	let speechFloorDb = noiseFloorDb;
 	let consecutiveAbove = 0;
@@ -105,6 +113,7 @@ export function createEnergyVad(options: EnergyVadOptions = {}) {
 
 	function resetUtterance(): void {
 		speaking = false;
+		speechConfirmed = false;
 		consecutiveAbove = 0;
 		hangoverFrames = 0;
 		speechFrames = 0;
@@ -163,6 +172,10 @@ export function createEnergyVad(options: EnergyVadOptions = {}) {
 		speechFrames += 1;
 		if (rmsDb > endThresholdDb()) hangoverFrames = 0;
 		else hangoverFrames += 1;
+		if (!speechConfirmed && speechFrames - hangoverFrames >= confirmationFrames) {
+			speechConfirmed = true;
+			events.push({ type: "speech_confirmed" });
+		}
 
 		if (hangoverFrames >= hangoverFramesNeeded) finish(events, false);
 		else if (utteranceFrames.length >= maxUtteranceFrames) finish(events, true);
