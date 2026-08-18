@@ -158,6 +158,9 @@ describe("continuous talk mode", () => {
 
 		const systemPrompt = await mode.beginAgentRun("base prompt", context as any);
 		expect(systemPrompt).toContain(TALK_SYSTEM_PROMPT);
+		expect(captures).toHaveLength(2);
+		expect(captures[1]!.killedWith).toBeUndefined();
+		expect(mode.getPhase()).toBe("listening");
 		mode.handleMessageUpdate({
 			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "First spoken sentence. Trailing" }] },
 		});
@@ -168,14 +171,15 @@ describe("continuous talk mode", () => {
 
 		expect(spoken.join(" ")).toContain("First spoken sentence");
 		expect(spoken.join(" ")).toContain("Trailing words");
-		expect(captures).toHaveLength(2);
+		expect(captures[1]!.killedWith).toBe("SIGKILL");
+		expect(captures).toHaveLength(3);
 		expect(mode.getPhase()).toBe("listening");
 
 		expect(await mode.disable(context as any)).toBe(true);
 		expect(pi.model).toBe(pi.originalModel);
 		expect(pi.thinkingLevel).toBe("xhigh");
 		expect(pi.activeTools).toEqual(originalTools);
-		expect(captures[1]!.killedWith).toBe("SIGKILL");
+		expect(captures[2]!.killedWith).toBe("SIGKILL");
 		expect(mode.getPhase()).toBe("off");
 	});
 

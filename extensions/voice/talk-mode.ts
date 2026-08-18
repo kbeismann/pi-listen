@@ -99,11 +99,10 @@ function isValidTalkModel(config: ContinuousTalkConfig): boolean {
 /**
  * Hands-free local-audio conversation controller.
  *
- * The loop is intentionally half duplex: it records until VAD finds an
- * endpoint, closes the microphone, transcribes, speaks the complete agent
- * turn, and then listens again. Closing capture during local TTS prevents the
- * speaker from becoming the next user utterance without requiring cloud echo
- * cancellation or headphones.
+ * Capture remains active while the model is thinking so the user can add a
+ * correction without waiting for a long reasoning turn. The loop still closes
+ * capture before local TTS starts; speaker-safe playback remains half duplex
+ * until an explicit barge-in mode opts into simultaneous capture and playback.
  */
 export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependencies) {
 	const state = {
@@ -445,7 +444,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.generalSpeechSuppressed = talkScoped;
 		state.messageStreams.clear();
 		if (!talkScoped) return undefined;
-		stopCapture();
 		state.speechAbort?.abort();
 		if (state.targetModel && modelKey((ctx as any).model) !== modelKey(state.targetModel)) {
 			try {
@@ -457,6 +455,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 		applyConstraints(ctx);
 		setPhase("thinking", ctx);
+		startCapture(ctx);
 		return `${systemPrompt}\n\n${TALK_SYSTEM_PROMPT}`;
 	}
 
@@ -481,6 +480,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		const lifecycleEpoch = state.lifecycleEpoch;
 		state.speechTail = state.speechTail.catch(() => {}).then(async () => {
 			if (!runIsCurrent(runId, lifecycleEpoch) || !state.config || !state.ctx) return;
+			// Listening overlaps model inference, but not speaker playback. Closing
+			// capture here preserves the existing feedback-safe behavior while
+			// still allowing corrections during long reasoning delays.
+			stopCapture();
 			const controller = new AbortController();
 			state.speechAbort = controller;
 			setPhase("speaking");
