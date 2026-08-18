@@ -47,10 +47,22 @@ interface MessageStreamState {
 	latestText: string;
 }
 
+interface UtteranceInterruption {
+	verifyBeforeInterrupting: boolean;
+	interruptedImmediately: boolean;
+	confirmed: boolean;
+}
+
 const STATUS_KEY = "continuous-talk";
 const INTERRUPTION_ENTRY_TYPE = "pi-listen-talk-interruption";
 const INTERRUPTED_AFTER_SPEECH = "[The user interrupted here; the remainder of the generated response was not heard.]";
 const INTERRUPTED_BEFORE_SPEECH = "[The user interrupted before any of this response was heard.]";
+const NON_INTERRUPTING_TALK_WORDS = new Set([
+	"ah", "er", "erm", "hm", "hmm", "huh", "mhm", "mm", "oh", "okay", "ok", "right", "sure", "uh", "um", "yeah", "yep", "yes",
+]);
+const NON_INTERRUPTING_TALK_PHRASES = new Set([
+	"continue", "go on", "got it", "i see", "keep going", "please continue", "take your time", "thank you", "thanks",
+]);
 
 export const TALK_SYSTEM_PROMPT = `[CONTINUOUS TALK MODE ACTIVE]
 The user is having a spoken conversation with you. This mode is read-only and nondestructive. Do not edit files, run shell commands, install software, publish, delete data, or cause external side effects. If write-capable work is needed, ask the user to leave talk mode first with /talk off.
@@ -110,6 +122,16 @@ function isValidTalkModel(config: ContinuousTalkConfig): boolean {
 	return Boolean(config.modelProvider) === Boolean(config.modelId);
 }
 
+function isSubstantiveInterruption(text: string): boolean {
+	const normalized = text
+		.normalize("NFKC")
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}]+/gu, " ")
+		.trim();
+	if (!normalized || NON_INTERRUPTING_TALK_PHRASES.has(normalized)) return false;
+	return !normalized.split(/\s+/).every((word) => NON_INTERRUPTING_TALK_WORDS.has(word));
+}
+
 /**
  * Hands-free local-audio conversation controller.
  *
@@ -129,6 +151,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		interruptionInProgress: false,
 		pendingBargeTurn: false,
 		bargeInGuardUntil: 0,
+		playbackActive: false,
+		utteranceInterruption: undefined as UtteranceInterruption | undefined,
 		generalSpeechSuppressed: false,
 		config: undefined as VoiceConfig | undefined,
 		audioRoute: undefined as TalkAudioRoute | undefined,
@@ -174,6 +198,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 
 	function cancelSpeechQueue(): void {
 		state.speechEpoch += 1;
+		state.playbackActive = false;
 		state.speechAbort?.abort();
 	}
 
@@ -198,24 +223,35 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 	}
 
-	function interruptForBargeIn(): void {
+	function interruptForBargeIn(options: { ignorePlaybackGuard?: boolean } = {}): boolean {
 		if (
 			!bargeInEnabled()
-			|| Date.now() < state.bargeInGuardUntil
+			|| (!options.ignorePlaybackGuard && Date.now() < state.bargeInGuardUntil)
 			|| !state.agentActive
 			|| state.interruptionInProgress
-		) return;
+		) return false;
 		recordInterruptedContext();
 		state.interruptionInProgress = true;
 		if (state.currentRun) state.currentRun.acceptingEvents = false;
 		cancelSpeechQueue();
 		try { (state.ctx as any)?.abort?.(); } catch {}
 		setPhase("hearing");
+		return true;
 	}
 
 	function handlePlaybackStart(): void {
+		state.playbackActive = true;
+		const utteranceInterruption = state.utteranceInterruption;
+		if (utteranceInterruption?.confirmed && utteranceInterruption.verifyBeforeInterrupting) {
+			utteranceInterruption.verifyBeforeInterrupting = false;
+			utteranceInterruption.interruptedImmediately = interruptForBargeIn();
+			// The user's sustained speech predates playback. Preserve its VAD
+			// state so it can finish and transcribe after the queued audio stops.
+			if (utteranceInterruption.interruptedImmediately) return;
+		}
 		if (talkConfig().bargeIn.mode !== "pipewire-aec" || !state.audioRoute?.echoCancelled) return;
 		state.bargeInGuardUntil = Date.now() + talkConfig().bargeIn.guardMs;
+		state.utteranceInterruption = undefined;
 		state.vad?.reset();
 	}
 
@@ -264,6 +300,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.captureErrorHandler = undefined;
 		state.captureExitHandler = undefined;
 		state.pcmRemainder = Buffer.alloc(0);
+		state.utteranceInterruption = undefined;
 		state.vad?.reset();
 		try { capture.process.kill(signal); } catch {}
 	}
@@ -288,12 +325,38 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			offset += frameBytes;
 			if (Date.now() < state.bargeInGuardUntil) continue;
 			for (const event of state.vad.pushFrame(frame)) {
-				if (event.type === "speech_start") setPhase("hearing");
-				if (event.type === "speech_confirmed") interruptForBargeIn();
-				if (event.type === "discarded") setPhase("listening");
+				if (event.type === "speech_start") {
+					const duringPlayback = state.playbackActive;
+					state.utteranceInterruption = {
+						// During model-only thinking, wait for local transcription so
+						// room noise and conversational backchannels cannot kill a run.
+						verifyBeforeInterrupting: bargeInEnabled() && state.agentActive && !duringPlayback,
+						interruptedImmediately: false,
+						confirmed: false,
+					};
+					setPhase("hearing");
+				}
+				if (event.type === "speech_confirmed") {
+					if (state.utteranceInterruption) state.utteranceInterruption.confirmed = true;
+					if (state.playbackActive || !state.utteranceInterruption?.verifyBeforeInterrupting) {
+						if (state.utteranceInterruption) {
+							state.utteranceInterruption.interruptedImmediately = interruptForBargeIn();
+						} else {
+							interruptForBargeIn();
+						}
+					}
+				}
+				if (event.type === "discarded") {
+					state.utteranceInterruption = undefined;
+					setPhase("listening");
+				}
 				if (event.type === "speech_end") {
+					const utteranceInterruption = state.utteranceInterruption;
 					stopCapture();
-					const transcription = transcribeAndSubmit(event.pcm, epoch);
+					const transcription = transcribeAndSubmit(event.pcm, epoch, {
+						verifyBeforeInterrupting: utteranceInterruption?.verifyBeforeInterrupting === true
+							&& utteranceInterruption.interruptedImmediately === false,
+					});
 					state.transcription = transcription;
 					void transcription.finally(() => {
 						if (state.transcription === transcription) state.transcription = undefined;
@@ -354,18 +417,26 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		return true;
 	}
 
-	async function transcribeAndSubmit(pcm: Buffer, epoch: number): Promise<void> {
+	async function transcribeAndSubmit(
+		pcm: Buffer,
+		epoch: number,
+		options: { verifyBeforeInterrupting?: boolean } = {},
+	): Promise<void> {
 		if (!state.enabled || state.lifecycleEpoch !== epoch || !state.config) return;
 		setPhase("transcribing");
 		try {
 			const text = (await dependencies.transcribe(pcm, state.config)).trim();
 			if (!state.enabled || state.lifecycleEpoch !== epoch) return;
-			if (!text) {
+			if (!text || (options.verifyBeforeInterrupting && !isSubstantiveInterruption(text))) {
 				state.interruptionInProgress = false;
+				state.pendingBargeTurn = false;
 				setPhase("listening");
 				startCapture();
 				return;
 			}
+			// The audio ended before transcription began, so it cannot be echo
+			// from playback that started while local STT was running.
+			if (options.verifyBeforeInterrupting) interruptForBargeIn({ ignorePlaybackGuard: true });
 			if (state.interruptionInProgress) state.pendingBargeTurn = true;
 			setPhase("thinking");
 			const result = (pi as any).sendUserMessage(text, { deliverAs: "steer" });
@@ -536,6 +607,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.interruptionInProgress = false;
 		state.pendingBargeTurn = false;
 		state.bargeInGuardUntil = 0;
+		state.playbackActive = false;
+		state.utteranceInterruption = undefined;
 		setPhase("stopping", ctx);
 		state.prepareAbort?.abort();
 		cancelSpeechQueue();
@@ -661,6 +734,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 				}
 			} finally {
 				if (state.speechAbort === controller) state.speechAbort = undefined;
+				state.playbackActive = false;
 				if (speechEpoch === state.speechEpoch && runIsCurrent(runId, lifecycleEpoch) && state.currentRun?.acceptingEvents) setPhase("thinking");
 			}
 		});

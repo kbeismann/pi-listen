@@ -304,7 +304,8 @@ describe("continuous talk mode", () => {
 	test("headphone barge-in aborts speech and the active model run", async () => {
 		let speechAborted = false;
 		const harness = makeHarness({
-			speak: async (_text, _config, _ctx, signal) => new Promise<void>((_resolve, reject) => {
+			speak: async (_text, _config, _ctx, signal, _audioRoute, onPlaybackStart) => new Promise<void>((_resolve, reject) => {
+				onPlaybackStart?.();
 				const abort = () => {
 					speechAborted = true;
 					const error = new Error("aborted");
@@ -326,15 +327,223 @@ describe("continuous talk mode", () => {
 		await Bun.sleep(5);
 
 		expect(harness.captures[0]!.killedWith).toBeUndefined();
+		feedInOddChunks(harness.captures[0]!, Buffer.concat(
+			Array.from({ length: 16 }, () => toneFrame()),
+		));
+		await Bun.sleep(10);
+
+		expect(speechAborted).toBe(true);
+		expect(harness.context.abortCount).toBe(1);
+		expect(harness.pi.sentMessages).toEqual([]);
+
+		feedInOddChunks(harness.captures[0]!, Buffer.concat(
+			Array.from({ length: 12 }, () => Buffer.alloc(1_024)),
+		));
+		await Bun.sleep(10);
+
+		expect(harness.pi.sentMessages).toEqual([
+			{ text: "hello from the local microphone", options: { deliverAs: "steer" } },
+		]);
+		expect(harness.captures[0]!.killedWith).toBe("SIGKILL");
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("confirmed thinking speech interrupts when playback starts before its endpoint", async () => {
+		let speechAborted = false;
+		const route: TalkAudioRoute = {
+			mode: "pipewire-aec",
+			echoCancelled: true,
+			captureSource: "talk_aec_source",
+			playbackSink: "talk_aec_sink",
+			close: async () => {},
+		};
+		const harness = makeHarness({
+			prepareAudio: async () => route,
+			speak: async (_text, _config, _ctx, signal, _audioRoute, onPlaybackStart) => new Promise<void>((_resolve, reject) => {
+				onPlaybackStart?.();
+				const abort = () => {
+					speechAborted = true;
+					const error = new Error("aborted");
+					error.name = "AbortError";
+					reject(error);
+				};
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			}),
+		});
+		harness.config.talk.bargeIn.mode = "pipewire-aec";
+		harness.config.talk.bargeIn.guardMs = 0;
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+
+		feedInOddChunks(harness.captures[0]!, Buffer.concat(
+			Array.from({ length: 16 }, () => toneFrame()),
+		));
+		await Bun.sleep(10);
+		expect(harness.context.abortCount).toBe(0);
+
+		harness.mode.handleMessageEnd({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "Playback began while the user was speaking." }] },
+		});
+		await Bun.sleep(10);
+
+		expect(speechAborted).toBe(true);
+		expect(harness.context.abortCount).toBe(1);
+		expect(harness.captures[0]!.killedWith).toBeUndefined();
+		expect(harness.pi.sentMessages).toEqual([]);
+
+		feedInOddChunks(harness.captures[0]!, Buffer.concat(
+			Array.from({ length: 12 }, () => Buffer.alloc(1_024)),
+		));
+		await Bun.sleep(10);
+
+		expect(harness.pi.sentMessages).toEqual([
+			{ text: "hello from the local microphone", options: { deliverAs: "steer" } },
+		]);
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("thinking barge-in waits for a substantive transcription before aborting", async () => {
+		let resolveTranscription: ((text: string) => void) | undefined;
+		const harness = makeHarness({
+			transcribe: async () => new Promise<string>((resolve) => {
+				resolveTranscription = resolve;
+			}),
+		});
+		harness.config.talk.bargeIn.mode = "headphones";
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+
 		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(10);
+
+		expect(resolveTranscription).toBeDefined();
+		expect(harness.context.abortCount).toBe(0);
+		expect(harness.pi.sentMessages).toEqual([]);
+
+		resolveTranscription?.("Actually, compare it with my current sword.");
+		await Bun.sleep(10);
+
+		expect(harness.context.abortCount).toBe(1);
+		expect(harness.pi.sentMessages).toEqual([
+			{ text: "Actually, compare it with my current sword.", options: { deliverAs: "steer" } },
+		]);
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("verified thinking speech bypasses a playback guard that starts during transcription", async () => {
+		let resolveTranscription: ((text: string) => void) | undefined;
+		let speechAborted = false;
+		const route: TalkAudioRoute = {
+			mode: "pipewire-aec",
+			echoCancelled: true,
+			captureSource: "talk_aec_source",
+			playbackSink: "talk_aec_sink",
+			close: async () => {},
+		};
+		const harness = makeHarness({
+			prepareAudio: async () => route,
+			transcribe: async () => new Promise<string>((resolve) => {
+				resolveTranscription = resolve;
+			}),
+			speak: async (_text, _config, _ctx, signal, _audioRoute, onPlaybackStart) => new Promise<void>((_resolve, reject) => {
+				onPlaybackStart?.();
+				const abort = () => {
+					speechAborted = true;
+					const error = new Error("aborted");
+					error.name = "AbortError";
+					reject(error);
+				};
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			}),
+		});
+		harness.config.talk.bargeIn.mode = "pipewire-aec";
+		harness.config.talk.bargeIn.guardMs = 10_000;
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(10);
+		expect(resolveTranscription).toBeDefined();
+		expect(harness.context.abortCount).toBe(0);
+
+		harness.mode.handleMessageEnd({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "Playback started during local transcription." }] },
+		});
+		await Bun.sleep(10);
+		expect(speechAborted).toBe(false);
+
+		resolveTranscription?.("Actually, answer a different question.");
 		await Bun.sleep(10);
 
 		expect(speechAborted).toBe(true);
 		expect(harness.context.abortCount).toBe(1);
 		expect(harness.pi.sentMessages).toEqual([
-			{ text: "hello from the local microphone", options: { deliverAs: "steer" } },
+			{ text: "Actually, answer a different question.", options: { deliverAs: "steer" } },
 		]);
-		expect(harness.captures[0]!.killedWith).toBe("SIGKILL");
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("thinking barge-in ignores conversational backchannels", async () => {
+		const route: TalkAudioRoute = {
+			mode: "pipewire-aec",
+			echoCancelled: true,
+			captureSource: "talk_aec_source",
+			playbackSink: "talk_aec_sink",
+			close: async () => {},
+		};
+		const harness = makeHarness({
+			prepareAudio: async () => route,
+			transcribe: async () => "Mm-hmm.",
+		});
+		harness.config.talk.bargeIn.mode = "pipewire-aec";
+		harness.config.talk.bargeIn.guardMs = 0;
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(10);
+
+		expect(harness.context.abortCount).toBe(0);
+		expect(harness.pi.sentMessages).toEqual([]);
+		expect(harness.captures).toHaveLength(2);
+		expect(harness.captures[1]!.killedWith).toBeUndefined();
+		expect(harness.mode._state.currentRun?.acceptingEvents).toBe(true);
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("thinking barge-in ignores an empty transcription", async () => {
+		const harness = makeHarness({ transcribe: async () => "" });
+		harness.config.talk.bargeIn.mode = "headphones";
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(10);
+
+		expect(harness.context.abortCount).toBe(0);
+		expect(harness.pi.sentMessages).toEqual([]);
+		expect(harness.captures).toHaveLength(2);
+		expect(harness.mode._state.currentRun?.acceptingEvents).toBe(true);
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("thinking barge-in keeps the model running when transcription fails", async () => {
+		const harness = makeHarness({
+			transcribe: async () => { throw new Error("unintelligible audio"); },
+		});
+		harness.config.talk.bargeIn.mode = "headphones";
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(10);
+
+		expect(harness.context.abortCount).toBe(0);
+		expect(harness.pi.sentMessages).toEqual([]);
+		expect(harness.captures).toHaveLength(2);
+		expect(harness.context.notifications.some(({ message }) => message.includes("unintelligible audio"))).toBe(true);
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
