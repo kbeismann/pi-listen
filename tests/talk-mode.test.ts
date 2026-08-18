@@ -27,6 +27,7 @@ class MockPi {
 	activeTools = ["read", "grep", "find", "ls", "bash", "write"];
 	allTools = this.activeTools.map((name) => ({ name }));
 	sentMessages: Array<{ text: string; options: any }> = [];
+	entries: Array<{ type: "custom"; customType: string; data: unknown }> = [];
 	modelChanges: string[] = [];
 	registerTalkModel = true;
 	restoreFailures = 0;
@@ -48,6 +49,9 @@ class MockPi {
 	}
 	sendUserMessage(text: string, options: any): void {
 		this.sentMessages.push({ text, options });
+	}
+	appendEntry(customType: string, data: unknown): void {
+		this.entries.push({ type: "custom", customType, data });
 	}
 }
 
@@ -82,6 +86,9 @@ function makeContext(pi: MockPi) {
 		isIdle: () => true,
 		abort: () => { abortCount += 1; },
 		waitForIdle: async () => {},
+		sessionManager: {
+			getEntries: () => pi.entries,
+		},
 		ui: {
 			notify(message: string, level: string) { notifications.push({ message, level }); },
 			setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
@@ -435,5 +442,113 @@ describe("continuous talk mode", () => {
 		await harness.mode.disable(harness.context as any, { notify: false });
 		expect(harness.mode._state.audioRoute).toBeUndefined();
 		expect(closeCount).toBe(3);
+	});
+
+	test("interrupted context retains only completed speech", async () => {
+		let speechCall = 0;
+		const harness = makeHarness({
+			speak: async (_text, _config, _ctx, signal) => {
+				speechCall += 1;
+				if (speechCall === 1) return;
+				return new Promise<void>((_resolve, reject) => {
+					const abort = () => {
+						const error = new Error("aborted");
+						error.name = "AbortError";
+						reject(error);
+					};
+					if (signal.aborted) abort();
+					else signal.addEventListener("abort", abort, { once: true });
+				});
+			},
+		});
+		harness.config.talk.bargeIn.mode = "headphones";
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+
+		harness.mode.handleMessageUpdate({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "Heard sentence. Unheard" }] },
+		});
+		await Bun.sleep(5);
+		harness.mode.handleMessageEnd({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "Heard sentence. Unheard sentence." }] },
+		});
+		await Bun.sleep(5);
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(10);
+
+		const result = harness.mode.handleContext({
+			messages: [
+				{ id: "answer", role: "assistant", content: [{ type: "text", text: "Heard sentence. Unheard sentence." }] },
+			],
+		});
+		const contextText = result?.messages[0].content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text)
+			.join(" ");
+		expect(contextText).toContain("Heard sentence.");
+		expect(contextText).not.toContain("Unheard sentence.");
+		expect(contextText).toContain("remainder of the generated response was not heard");
+		expect(harness.pi.entries).toHaveLength(1);
+
+		const restored = makeHarness();
+		restored.pi.entries.push(...harness.pi.entries);
+		restored.mode.restoreInterruptedContext(restored.context as any);
+		expect(restored.mode.handleContext({
+			messages: [
+				{ id: "answer", role: "assistant", content: [{ type: "text", text: "Heard sentence. Unheard sentence." }] },
+			],
+		})?.messages[0].content.map((block: any) => block.text).join(" ")).not.toContain("Unheard sentence.");
+
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("interrupted context trims every assistant message with unheard speech", async () => {
+		let speechCall = 0;
+		const harness = makeHarness({
+			speak: async (_text, _config, _ctx, signal) => {
+				speechCall += 1;
+				if (speechCall === 1) return;
+				return new Promise<void>((_resolve, reject) => {
+					const abort = () => {
+						const error = new Error("aborted");
+						error.name = "AbortError";
+						reject(error);
+					};
+					if (signal.aborted) abort();
+					else signal.addEventListener("abort", abort, { once: true });
+				});
+			},
+		});
+		harness.config.talk.bargeIn.mode = "headphones";
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+
+		harness.mode.handleMessageUpdate({
+			message: { id: "first", role: "assistant", content: [{ type: "text", text: "First heard. First unheard" }] },
+		});
+		await Bun.sleep(5);
+		harness.mode.handleMessageEnd({
+			message: { id: "first", role: "assistant", content: [{ type: "text", text: "First heard. First unheard." }] },
+		});
+		harness.mode.handleMessageEnd({
+			message: { id: "second", role: "assistant", content: [{ type: "text", text: "Second unheard." }] },
+		});
+		await Bun.sleep(5);
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(10);
+
+		const result = harness.mode.handleContext({
+			messages: [
+				{ id: "first", role: "assistant", content: [{ type: "text", text: "First heard. First unheard." }] },
+				{ id: "second", role: "assistant", content: [{ type: "text", text: "Second unheard." }] },
+			],
+		});
+		const firstText = result?.messages[0].content.map((block: any) => block.text).join(" ");
+		const secondText = result?.messages[1].content.map((block: any) => block.text).join(" ");
+		expect(firstText).toContain("First heard.");
+		expect(firstText).not.toContain("First unheard.");
+		expect(secondText).not.toContain("Second unheard.");
+		expect(harness.pi.entries).toHaveLength(2);
+		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 });

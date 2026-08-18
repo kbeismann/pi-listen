@@ -42,10 +42,15 @@ interface TalkRun {
 
 interface MessageStreamState {
 	runId: number;
-	spokenLength: number;
+	queuedLength: number;
+	completedLength: number;
+	latestText: string;
 }
 
 const STATUS_KEY = "continuous-talk";
+const INTERRUPTION_ENTRY_TYPE = "pi-listen-talk-interruption";
+const INTERRUPTED_AFTER_SPEECH = "[The user interrupted here; the remainder of the generated response was not heard.]";
+const INTERRUPTED_BEFORE_SPEECH = "[The user interrupted before any of this response was heard.]";
 
 export const TALK_SYSTEM_PROMPT = `[CONTINUOUS TALK MODE ACTIVE]
 The user is having a spoken conversation with you. This mode is read-only and nondestructive. Do not edit files, run shell commands, install software, publish, delete data, or cause external side effects. If write-capable work is needed, ask the user to leave talk mode first with /talk off.
@@ -140,6 +145,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		speechEpoch: 0,
 		speechTail: Promise.resolve(),
 		messageStreams: new Map<string, MessageStreamState>(),
+		interruptedMessages: new Map<string, string>(),
 		previousModel: undefined as any,
 		previousThinkingLevel: undefined as string | undefined,
 		previousActiveTools: undefined as string[] | undefined,
@@ -171,6 +177,27 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.speechAbort?.abort();
 	}
 
+	function recordInterruptedContext(): void {
+		const runId = state.currentRun?.id;
+		if (runId === undefined) return;
+		const streams: Array<[string, MessageStreamState]> = [];
+		for (const [key, stream] of state.messageStreams) {
+			if (stream.runId === runId) streams.push([key, stream]);
+		}
+		const latestKey = streams.at(-1)?.[0];
+		for (const [key, stream] of streams) {
+			// Fully heard earlier messages need no marker. Always snapshot the
+			// latest message so provider deltas racing with abort cannot add text
+			// beyond the audible prefix.
+			if (key !== latestKey && stream.completedLength >= stream.latestText.length) continue;
+			const heardText = stream.latestText.slice(0, stream.completedLength);
+			state.interruptedMessages.set(key, heardText);
+			try {
+				(pi as any).appendEntry?.(INTERRUPTION_ENTRY_TYPE, { messageKey: key, heardText });
+			} catch {}
+		}
+	}
+
 	function interruptForBargeIn(): void {
 		if (
 			!bargeInEnabled()
@@ -178,6 +205,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			|| !state.agentActive
 			|| state.interruptionInProgress
 		) return;
+		recordInterruptedContext();
 		state.interruptionInProgress = true;
 		if (state.currentRun) state.currentRun.acceptingEvents = false;
 		cancelSpeechQueue();
@@ -599,7 +627,11 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		);
 	}
 
-	function enqueueSpeech(text: string, runId: number): void {
+	function enqueueSpeech(
+		text: string,
+		runId: number,
+		completion: { messageId: string; completedLength: number },
+	): void {
 		const lifecycleEpoch = state.lifecycleEpoch;
 		const speechEpoch = state.speechEpoch;
 		state.speechTail = state.speechTail.catch(() => {}).then(async () => {
@@ -619,6 +651,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 					state.audioRoute,
 					handlePlaybackStart,
 				);
+				const stream = state.messageStreams.get(completion.messageId);
+				if (stream?.runId === runId) {
+					stream.completedLength = Math.max(stream.completedLength, completion.completedLength);
+				}
 			} catch (error) {
 				if ((error as Error)?.name !== "AbortError" && speechEpoch === state.speechEpoch && runIsCurrent(runId, lifecycleEpoch)) {
 					notify(state.ctx, `Talk speech failed: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -639,11 +675,12 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (!fullText) return;
 
 		let stream = state.messageStreams.get(messageId);
-		if (!stream || stream.runId !== runId || fullText.length < stream.spokenLength) {
-			stream = { runId, spokenLength: 0 };
+		if (!stream || stream.runId !== runId || fullText.length < stream.queuedLength) {
+			stream = { runId, queuedLength: 0, completedLength: 0, latestText: fullText };
 			state.messageStreams.set(messageId, stream);
 		}
-		const newText = fullText.slice(stream.spokenLength);
+		stream.latestText = fullText;
+		const newText = fullText.slice(stream.queuedLength);
 		if (!newText) return;
 
 		let speakLength = 0;
@@ -656,14 +693,65 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (speakLength <= 0) return;
 
 		const chunk = newText.slice(0, speakLength).trim();
-		stream.spokenLength += speakLength;
+		stream.queuedLength += speakLength;
 		if (!chunk) return;
 		const prepared = prepareForSpeech(chunk, {
 			maxChars: 2_000,
 			stripCodeBlocks: true,
 			collapseLinks: true,
 		});
-		if (!prepared.skipped && prepared.text.trim()) enqueueSpeech(prepared.text, runId);
+		if (!prepared.skipped && prepared.text.trim()) {
+			enqueueSpeech(prepared.text, runId, {
+				messageId,
+				completedLength: stream.queuedLength,
+			});
+		}
+	}
+
+	function truncateInterruptedMessage(message: any, heardText: string): any {
+		let remaining = heardText.length;
+		const content: any[] = [];
+		for (const block of Array.isArray(message?.content) ? message.content : []) {
+			if (block?.type !== "text" || typeof block.text !== "string") {
+				content.push(block);
+				continue;
+			}
+			if (remaining <= 0) continue;
+			const text = block.text.slice(0, remaining);
+			remaining -= text.length;
+			if (text) content.push({ ...block, text });
+		}
+		content.push({
+			type: "text",
+			text: heardText.trim() ? INTERRUPTED_AFTER_SPEECH : INTERRUPTED_BEFORE_SPEECH,
+		});
+		return { ...message, content };
+	}
+
+	function handleContext(event: any): { messages: any[] } | undefined {
+		if (state.interruptedMessages.size === 0 || !Array.isArray(event?.messages)) return undefined;
+		let changed = false;
+		const messages = event.messages.map((message: any) => {
+			if (message?.role !== "assistant") return message;
+			const heardText = state.interruptedMessages.get(messageKey(message));
+			if (heardText === undefined) return message;
+			changed = true;
+			return truncateInterruptedMessage(message, heardText);
+		});
+		return changed ? { messages } : undefined;
+	}
+
+	function restoreInterruptedContext(ctx: TalkContext): void {
+		const entries = (ctx as any).sessionManager?.getEntries?.();
+		if (!Array.isArray(entries)) return;
+		for (const entry of entries) {
+			if (entry?.type !== "custom" || entry.customType !== INTERRUPTION_ENTRY_TYPE) continue;
+			const key = entry.data?.messageKey;
+			const heardText = entry.data?.heardText;
+			if (typeof key === "string" && typeof heardText === "string") {
+				state.interruptedMessages.set(key, heardText);
+			}
+		}
 	}
 
 	function handleMessageUpdate(event: any): void {
@@ -747,6 +835,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		handleMessageUpdate,
 		handleMessageEnd,
 		handleTurnEnd,
+		handleContext,
+		restoreInterruptedContext,
 		handleAgentSettled,
 		handleInput,
 		handleToolCall,

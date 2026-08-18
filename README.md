@@ -171,6 +171,7 @@ Talk mode defaults to speaker-safe playback. It closes microphone capture before
 The mode is isolated from ordinary Pi turns:
 
 - Its conversational system prompt asks for short spoken sentences without headings, lists, tables, Markdown, or code-heavy text.
+- When a response is interrupted, later turns see only the completed spoken prefix plus an interruption marker, not generated text the user never heard.
 - It temporarily limits tools to a configured read-only allowlist.
 - It can temporarily select a dedicated text model and thinking level.
 - `/talk off` restores the exact previous model, thinking level, and active tools.

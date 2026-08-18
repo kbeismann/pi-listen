@@ -3312,6 +3312,9 @@ export default function (pi: ExtensionAPI) {
 		onAudioChunk: updateAudioLevel,
 	});
 	talkMode = continuousTalk;
+	pi.on("session_start", async (_event, eventCtx) => {
+		continuousTalk.restoreInterruptedContext(eventCtx);
+	});
 
 	pi.registerCommand("talk", {
 		description: "Hands-free local conversation: /talk [on|off|status]",
@@ -3379,6 +3382,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("turn_end", async (event) => {
 		continuousTalk.handleTurnEnd(event);
 	});
+
+	pi.on("context", async (event) => continuousTalk.handleContext(event));
 
 	// agent_settled is the only safe boundary after retries and queued
 	// continuations. Older pi-listen development types predate the event, but
