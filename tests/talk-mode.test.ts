@@ -306,7 +306,7 @@ describe("continuous talk mode", () => {
 		expect(mode._state.snapshotTaken).toBe(false);
 	});
 
-	test("talk off aborts pending local speech and prevents microphone restart", async () => {
+	test("talk off cancels pending local speech and prevents microphone restart", async () => {
 		let speechAborted = false;
 		const harness = makeHarness({
 			speak: async (_text, _config, _ctx, signal) => new Promise<void>((resolve, reject) => {
@@ -330,6 +330,26 @@ describe("continuous talk mode", () => {
 
 		expect(speechAborted).toBe(true);
 		expect(harness.captures).toHaveLength(1);
+		expect(harness.mode.getPhase()).toBe("off");
+	});
+
+	test("talk off waits for active model work instead of aborting it", async () => {
+		const harness = makeHarness();
+		let idle = true;
+		let waitForIdleCount = 0;
+		(harness.context as any).isIdle = () => idle;
+		(harness.context as any).waitForIdle = async () => {
+			waitForIdleCount += 1;
+			idle = true;
+		};
+
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		idle = false;
+		await harness.mode.disable(harness.context as any, { notify: false });
+
+		expect(waitForIdleCount).toBe(1);
+		expect(harness.context.abortCount).toBe(0);
 		expect(harness.mode.getPhase()).toBe("off");
 	});
 
@@ -377,7 +397,7 @@ describe("continuous talk mode", () => {
 		await Bun.sleep(10);
 
 		expect(speechAborted).toBe(true);
-		expect(harness.context.abortCount).toBe(1);
+		expect(harness.context.abortCount).toBe(0);
 		expect(harness.pi.sentMessages).toEqual([]);
 
 		feedInOddChunks(harness.captures[0]!, Buffer.concat(
@@ -432,7 +452,7 @@ describe("continuous talk mode", () => {
 		await Bun.sleep(10);
 
 		expect(speechAborted).toBe(true);
-		expect(harness.context.abortCount).toBe(1);
+		expect(harness.context.abortCount).toBe(0);
 		expect(harness.captures[0]!.killedWith).toBeUndefined();
 		expect(harness.pi.sentMessages).toEqual([]);
 
@@ -447,7 +467,7 @@ describe("continuous talk mode", () => {
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
-	test("thinking barge-in waits for a substantive transcription before aborting", async () => {
+	test("thinking barge-in waits for substantive transcription without aborting the model", async () => {
 		let resolveTranscription: ((text: string) => void) | undefined;
 		const harness = makeHarness({
 			transcribe: async () => new Promise<string>((resolve) => {
@@ -468,7 +488,7 @@ describe("continuous talk mode", () => {
 		resolveTranscription?.("Actually, compare it with my current sword.");
 		await Bun.sleep(10);
 
-		expect(harness.context.abortCount).toBe(1);
+		expect(harness.context.abortCount).toBe(0);
 		expect(harness.pi.sentMessages).toEqual([
 			{ text: "Actually, compare it with my current sword.", options: { deliverAs: "steer" } },
 		]);
@@ -522,7 +542,7 @@ describe("continuous talk mode", () => {
 		await Bun.sleep(10);
 
 		expect(speechAborted).toBe(true);
-		expect(harness.context.abortCount).toBe(1);
+		expect(harness.context.abortCount).toBe(0);
 		expect(harness.pi.sentMessages).toEqual([
 			{ text: "Actually, answer a different question.", options: { deliverAs: "steer" } },
 		]);

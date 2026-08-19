@@ -265,8 +265,9 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		const latestKey = streams.at(-1)?.[0];
 		for (const [key, stream] of streams) {
 			// Fully heard earlier messages need no marker. Always snapshot the
-			// latest message so provider deltas racing with abort cannot add text
-			// beyond the audible prefix.
+			// latest message. Model generation deliberately continues after TTS is
+			// cancelled, but later provider deltas remain unheard and must not be
+			// added beyond the audible prefix in the next model context.
 			if (key !== latestKey && stream.completedLength >= stream.latestText.length) continue;
 			const heardText = stream.latestText.slice(0, stream.completedLength);
 			state.interruptedMessages.set(key, heardText);
@@ -276,7 +277,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 	}
 
-	function interruptForBargeIn(options: { ignorePlaybackGuard?: boolean } = {}): boolean {
+	function interruptSpeechForBargeIn(options: { ignorePlaybackGuard?: boolean } = {}): boolean {
 		if (
 			!bargeInEnabled()
 			|| (!options.ignorePlaybackGuard && Date.now() < state.bargeInGuardUntil)
@@ -286,8 +287,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		recordInterruptedContext();
 		state.interruptionInProgress = true;
 		if (state.currentRun) state.currentRun.acceptingEvents = false;
+		// Spoken input is steering for the current agent loop. Cancel queued and
+		// active TTS so the user is heard immediately, but never abort model
+		// reasoning or tool work; Pi delivers the steer at its next safe boundary.
 		cancelSpeechQueue();
-		try { (state.ctx as any)?.abort?.(); } catch {}
 		setPhase("hearing");
 		return true;
 	}
@@ -297,7 +300,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		const utteranceInterruption = state.utteranceInterruption;
 		if (utteranceInterruption?.confirmed && utteranceInterruption.verifyBeforeInterrupting) {
 			utteranceInterruption.verifyBeforeInterrupting = false;
-			utteranceInterruption.interruptedImmediately = interruptForBargeIn();
+			utteranceInterruption.interruptedImmediately = interruptSpeechForBargeIn();
 			// The user's sustained speech predates playback. Preserve its VAD
 			// state so it can finish and transcribe after the queued audio stops.
 			if (utteranceInterruption.interruptedImmediately) return;
@@ -394,9 +397,9 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 					if (state.utteranceInterruption) state.utteranceInterruption.confirmed = true;
 					if (state.playbackActive || !state.utteranceInterruption?.verifyBeforeInterrupting) {
 						if (state.utteranceInterruption) {
-							state.utteranceInterruption.interruptedImmediately = interruptForBargeIn();
+							state.utteranceInterruption.interruptedImmediately = interruptSpeechForBargeIn();
 						} else {
-							interruptForBargeIn();
+							interruptSpeechForBargeIn();
 						}
 					}
 				}
@@ -498,7 +501,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			}
 			// The audio ended before transcription began, so it cannot be echo
 			// from playback that started while local STT was running.
-			if (options.verifyBeforeInterrupting) interruptForBargeIn({ ignorePlaybackGuard: true });
+			if (options.verifyBeforeInterrupting) interruptSpeechForBargeIn({ ignorePlaybackGuard: true });
 			if (state.interruptionInProgress) state.pendingBargeTurn = true;
 			setPhase("thinking");
 			const result = (pi as any).sendUserMessage(text, { deliverAs: "steer" });
@@ -682,7 +685,9 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			try { await state.transcription; } catch {}
 		}
 		if (typeof (ctx as any)?.isIdle === "function" && !(ctx as any).isIdle()) {
-			try { (ctx as any).abort?.(); } catch {}
+			// Capture and TTS are already stopped above. Let the active model turn
+			// reach its normal boundary before restoring the previous model and
+			// tools; leaving talk mode must not cancel reasoning or tool work.
 			try { await (ctx as any).waitForIdle?.(); } catch {}
 		}
 		await closeAudioRoute(ctx);
