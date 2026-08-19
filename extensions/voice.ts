@@ -93,6 +93,7 @@ import {
 } from "./voice/local";
 import { createTalkMode } from "./voice/talk-mode";
 import { installTalkIntegration } from "./voice/talk-integration";
+import { createTalkSpeechOutput } from "./voice/talk-speech-output";
 import { createPipeWireEchoCancellation } from "./voice/pipewire-aec";
 import { createSherpaSpeechDetector, prepareSherpaVad } from "./voice/sherpa-vad";
 
@@ -3223,6 +3224,7 @@ export default function (pi: ExtensionAPI) {
 	// /talk lifecycle and is removed when the mode stops.
 	const talkSafeToolsByOwner = new Map<string, Set<string>>();
 	let publishTalkState = (): void => {};
+	const talkSpeechOutput = createTalkSpeechOutput();
 	const continuousTalk = createTalkMode(pi, {
 		getConfig: () => config,
 		spawnCapture: (audioRoute) => {
@@ -3300,26 +3302,10 @@ export default function (pi: ExtensionAPI) {
 			};
 			return transcribeLocalPcm(pcm, sttConfig);
 		},
-		speak: async (text, voiceConfig, _talkCtx, signal, audioRoute, onPlaybackStart) => {
-			const { speak } = await import("./voice/speak");
-			const { getInstalledTtsModelDir } = await import("./voice/tts-local-models");
-			const talkVoiceConfig: VoiceConfig = {
-				...voiceConfig,
-				ttsEnabled: true,
-				ttsAutoSpeak: false,
-				ttsBackend: "local",
-				ttsLocalModel: voiceConfig.talk.ttsModel,
-				ttsLocalVoiceId: voiceConfig.talk.ttsVoiceId,
-			};
-			await speak({
-				text,
-				config: talkVoiceConfig,
-				signal,
-				pulseSink: audioRoute?.playbackSink,
-				onPlaybackStart,
-				resolveModelDir: (modelId) => getInstalledTtsModelDir(modelId),
-			});
-		},
+		speak: async (text, voiceConfig, _talkCtx, signal, audioRoute, onPlaybackStart) =>
+			talkSpeechOutput.queue(text, voiceConfig, signal, audioRoute, onPlaybackStart),
+		finishSpeech: () => talkSpeechOutput.finish(),
+		cancelSpeech: () => talkSpeechOutput.cancel(),
 		onAudioChunk: updateAudioLevel,
 		getAdditionalAllowedTools: () => [
 			...new Set(

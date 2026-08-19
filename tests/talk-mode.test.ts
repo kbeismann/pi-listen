@@ -248,6 +248,36 @@ describe("continuous talk mode", () => {
 		expect(mode.getPhase()).toBe("off");
 	});
 
+	test("drains shared playback once after every streamed fragment is heard", async () => {
+		let finishCount = 0;
+		let queuedCount = 0;
+		const harness = makeHarness({
+			speak: async (_text, _config, _ctx, _signal, _audioRoute, onPlaybackStart) => {
+				queuedCount += 1;
+				onPlaybackStart?.();
+				return { audioDurationMs: 2, playbackPending: true };
+			},
+			finishSpeech: async () => { finishCount += 1; },
+		});
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+
+		harness.mode.handleMessageUpdate({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "First sentence. Trailing" }] },
+		});
+		harness.mode.handleMessageEnd({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "First sentence. Trailing words." }] },
+		});
+		await harness.mode.handleAgentSettled();
+
+		expect(queuedCount).toBe(2);
+		expect(finishCount).toBe(1);
+		expect(harness.mode._state.messageStreams.get("id:answer")?.completedLength)
+			.toBe("First sentence. Trailing words.".length);
+		expect(harness.mode.getPhase()).toBe("listening");
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
 	test("allows exact read-only tools selected by a trusted integration", async () => {
 		const harness = makeHarness({
 			getAdditionalAllowedTools: () => ["pi_supervisor", "unknown_tool"],
@@ -881,6 +911,57 @@ describe("continuous talk mode", () => {
 			],
 		})?.messages[0].content.map((block: any) => block.text).join(" ")).not.toContain("Unheard sentence.");
 
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("shared playback cancellation retains only elapsed fragments", async () => {
+		let speechCall = 0;
+		let cancelCount = 0;
+		const harness = makeHarness({
+			speak: async (_text, _config, _ctx, _signal, _audioRoute, onPlaybackStart) => {
+				speechCall += 1;
+				onPlaybackStart?.();
+				return {
+					audioDurationMs: speechCall === 1 ? 1 : 60_000,
+					playbackPending: true,
+				};
+			},
+			finishSpeech: async () => {},
+			cancelSpeech: () => { cancelCount += 1; },
+		});
+		harness.config.talk.bargeIn.mode = "headphones";
+		harness.config.talk.bargeIn.minSpeechMs = 1_000;
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		cancelCount = 0;
+
+		harness.mode.handleMessageUpdate({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "Heard sentence. Unheard" }] },
+		});
+		await Bun.sleep(5);
+		harness.mode.handleMessageEnd({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "Heard sentence. Unheard sentence." }] },
+		});
+		await Bun.sleep(5);
+
+		feedInOddChunks(harness.captures[0]!, Buffer.concat([
+			...Array.from({ length: 34 }, () => toneFrame()),
+			...Array.from({ length: 12 }, () => Buffer.alloc(1_024)),
+		]));
+		await Bun.sleep(15);
+
+		const result = harness.mode.handleContext({
+			messages: [
+				{ id: "answer", role: "assistant", content: [{ type: "text", text: "Heard sentence. Unheard sentence." }] },
+			],
+		});
+		const contextText = result?.messages[0].content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text)
+			.join(" ");
+		expect(cancelCount).toBe(1);
+		expect(contextText).toContain("Heard sentence.");
+		expect(contextText).not.toContain("Unheard sentence.");
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 

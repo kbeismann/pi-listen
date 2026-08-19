@@ -61,17 +61,30 @@ export interface SpeakOpts {
 	pulseSink?: string;
 	/** Called once when audio is about to enter the playback device. */
 	onPlaybackStart?: () => void;
+	/**
+	 * Caller-owned PCM sink reused across multiple calls. When supplied,
+	 * `speak()` queues audio but deliberately leaves draining and cancellation
+	 * to the caller so adjacent streamed fragments share one player process.
+	 */
+	playbackStream?: PlaybackStream;
+}
+
+export interface SpeakResult {
+	/** Duration of locally synthesized PCM queued by this call. */
+	audioDurationMs: number;
 }
 
 /**
  * Synthesize `opts.text` and play it through the user's audio output.
- * Resolves when playback completes; rejects on abort or error.
+ * Normally resolves when playback completes. With a caller-owned
+ * `playbackStream`, resolves once PCM is queued so the caller can append later
+ * fragments before draining the shared stream.
  *
  * Errors propagate as-thrown:
  *   - DOMException("AbortError") if signal fires
  *   - Error("...") with a user-facing message for everything else
  */
-export async function speak(opts: SpeakOpts): Promise<void> {
+export async function speak(opts: SpeakOpts): Promise<SpeakResult> {
 	const { text, config, signal } = opts;
 
 	if (!text || typeof text !== "string" || !text.trim()) {
@@ -143,7 +156,9 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 	// engine returns it on the first synth result; for Deepgram we
 	// know it's the buildDeepgramSpeakUrl rate. We open the stream
 	// AFTER the first synth so we have a definitive rate to pass.
-	let stream: PlaybackStream | null = null;
+	const ownsPlaybackStream = opts.playbackStream === undefined;
+	let stream: PlaybackStream | null = opts.playbackStream ?? null;
+	let audioDurationMs = 0;
 
 	const cleanupStream = () => {
 		if (stream) {
@@ -178,7 +193,7 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 				}
 				await sink.end();
 				await sink.done();
-				return;
+				return { audioDurationMs };
 			} catch (err) {
 				try { sink.cancel(); } catch {}
 				throw err;
@@ -196,13 +211,16 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 			const audio = await (nextSynth ?? synthOne(chunks[i]!));
 			nextSynth = null;
 			if (signal?.aborted) throw makeAbortError();
+			if ("samples" in audio && audio.sampleRate > 0) {
+				audioDurationMs += (audio.samples.length / audio.sampleRate) * 1_000;
+			}
 
 			// Streaming path: open the sink lazily on first chunk so we
 			// have the actual sample rate. PCM-yielding chunks (local
 			// `{ samples, sampleRate }`) are write-and-go; pre-encoded
 			// WAV chunks (Deepgram REST) cannot stream and fall through.
 			if ("samples" in audio && audio.sampleRate) {
-				if (stream === null && i === 0) {
+				if (stream === null && i === 0 && ownsPlaybackStream) {
 					stream = openPlaybackStream({ sampleRate: audio.sampleRate, signal, pulseSink: opts.pulseSink });
 				}
 				if (stream) {
@@ -229,18 +247,18 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 		}
 
 		// Streaming path: tell the player no more PCM is coming and wait
-		// for it to drain. end() awaits all queued writes + appends a
-		// silence tail before signaling EOF (compensates for sox closing
-		// the audio device on EOF and dropping ~1s of buffered audio).
-		if (stream) {
+		// for it to drain. end() awaits all queued writes and applies any
+		// player-specific EOF flush before closing stdin.
+		if (stream && ownsPlaybackStream) {
 			await stream.end();
 			await stream.done();
 			stream = null;
 		}
 	} catch (err) {
-		cleanupStream();
+		if (ownsPlaybackStream) cleanupStream();
 		throw err;
 	}
+	return { audioDurationMs };
 }
 
 // ─── Backend dispatch ─────────────────────────────────────────────────────────

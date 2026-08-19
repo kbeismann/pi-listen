@@ -18,6 +18,13 @@ export interface TalkCapture {
 	tool: string;
 }
 
+export interface TalkSpeechResult {
+	/** Duration represented by PCM queued during this call. */
+	audioDurationMs: number;
+	/** True when a shared player still owns and is draining the queued PCM. */
+	playbackPending: boolean;
+}
+
 export interface TalkModeDependencies {
 	getConfig(): VoiceConfig;
 	spawnCapture(audioRoute?: TalkAudioRoute): TalkCapture | null;
@@ -32,7 +39,11 @@ export interface TalkModeDependencies {
 		signal: AbortSignal,
 		audioRoute?: TalkAudioRoute,
 		onPlaybackStart?: () => void,
-	): Promise<void>;
+	): Promise<void | TalkSpeechResult>;
+	/** Drain a shared player after the assistant turn has queued all speech. */
+	finishSpeech?(): Promise<void>;
+	/** Cancel queued and active audio without affecting model generation. */
+	cancelSpeech?(): void;
 	onAudioChunk?(chunk: Buffer): void;
 	getAdditionalAllowedTools?(): string[];
 	onStateChange?(): void;
@@ -49,6 +60,11 @@ interface MessageStreamState {
 	queuedLength: number;
 	completedLength: number;
 	latestText: string;
+}
+
+interface SpeechCompletion {
+	messageId: string;
+	completedLength: number;
 }
 
 interface UtteranceInterruption {
@@ -190,6 +206,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		pendingBargeTurn: false,
 		bargeInGuardUntil: 0,
 		playbackActive: false,
+		sharedPlaybackActive: false,
 		utteranceInterruption: undefined as UtteranceInterruption | undefined,
 		generalSpeechSuppressed: false,
 		config: undefined as VoiceConfig | undefined,
@@ -207,6 +224,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		speechAbort: undefined as AbortController | undefined,
 		speechEpoch: 0,
 		speechTail: Promise.resolve(),
+		speechCompletionTail: Promise.resolve(),
+		speechTimingAbort: undefined as AbortController | undefined,
 		messageStreams: new Map<string, MessageStreamState>(),
 		interruptedMessages: new Map<string, string>(),
 		previousModel: undefined as any,
@@ -253,10 +272,58 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		return mode === "pipewire-aec" && state.audioRoute?.echoCancelled === true;
 	}
 
+	function resetSharedSpeechOutput(): void {
+		state.sharedPlaybackActive = false;
+		state.playbackActive = false;
+		state.speechTimingAbort?.abort();
+		state.speechTimingAbort = undefined;
+		state.speechCompletionTail = Promise.resolve();
+		dependencies.cancelSpeech?.();
+	}
+
 	function cancelSpeechQueue(): void {
 		state.speechEpoch += 1;
-		state.playbackActive = false;
 		state.speechAbort?.abort();
+		resetSharedSpeechOutput();
+	}
+
+	function markSpeechComplete(runId: number, completion: SpeechCompletion): void {
+		const stream = state.messageStreams.get(completion.messageId);
+		if (stream?.runId === runId) {
+			stream.completedLength = Math.max(stream.completedLength, completion.completedLength);
+		}
+	}
+
+	function waitForPlaybackDuration(durationMs: number, signal: AbortSignal): Promise<void> {
+		if (durationMs <= 0 || signal.aborted) return Promise.resolve();
+		return new Promise((resolve) => {
+			const timer = setTimeout(done, durationMs);
+			function done() {
+				clearTimeout(timer);
+				signal.removeEventListener("abort", done);
+				resolve();
+			}
+			signal.addEventListener("abort", done, { once: true });
+		});
+	}
+
+	function queueSpeechCompletion(
+		runId: number,
+		lifecycleEpoch: number,
+		speechEpoch: number,
+		completion: SpeechCompletion,
+		durationMs: number,
+	): void {
+		const timing = state.speechTimingAbort ??= new AbortController();
+		state.speechCompletionTail = state.speechCompletionTail.catch(() => {}).then(async () => {
+			await waitForPlaybackDuration(Math.max(0, durationMs), timing.signal);
+			if (
+				timing.signal.aborted
+				|| speechEpoch !== state.speechEpoch
+				|| !runIsCurrent(runId, lifecycleEpoch)
+			) return;
+			markSpeechComplete(runId, completion);
+		});
 	}
 
 	function restorePhaseAfterIgnoredAudio(): void {
@@ -842,7 +909,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	function enqueueSpeech(
 		text: string,
 		runId: number,
-		completion: { messageId: string; completedLength: number },
+		completion: SpeechCompletion,
 	): void {
 		const lifecycleEpoch = state.lifecycleEpoch;
 		const speechEpoch = state.speechEpoch;
@@ -855,7 +922,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			state.speechAbort = controller;
 			setPhase("speaking");
 			try {
-				await dependencies.speak(
+				const result = await dependencies.speak(
 					text,
 					state.config,
 					state.ctx,
@@ -863,18 +930,33 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 					state.audioRoute,
 					handlePlaybackStart,
 				);
-				const stream = state.messageStreams.get(completion.messageId);
-				if (stream?.runId === runId) {
-					stream.completedLength = Math.max(stream.completedLength, completion.completedLength);
+				// Cancellation can race with a player accepting its final buffer.
+				// Never promote that stale completion into heard context after the
+				// speech epoch or run has changed.
+				if (speechEpoch !== state.speechEpoch || !runIsCurrent(runId, lifecycleEpoch)) return;
+				if (result?.playbackPending) {
+					state.sharedPlaybackActive = true;
+					queueSpeechCompletion(
+						runId,
+						lifecycleEpoch,
+						speechEpoch,
+						completion,
+						result.audioDurationMs,
+					);
+				} else {
+					markSpeechComplete(runId, completion);
 				}
 			} catch (error) {
+				if (state.sharedPlaybackActive) resetSharedSpeechOutput();
 				if ((error as Error)?.name !== "AbortError" && speechEpoch === state.speechEpoch && runIsCurrent(runId, lifecycleEpoch)) {
 					notify(state.ctx, `Talk speech failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 				}
 			} finally {
 				if (state.speechAbort === controller) state.speechAbort = undefined;
-				state.playbackActive = false;
-				if (speechEpoch === state.speechEpoch && runIsCurrent(runId, lifecycleEpoch) && state.currentRun?.acceptingEvents) setPhase("thinking");
+				if (!state.sharedPlaybackActive) state.playbackActive = false;
+				if (speechEpoch === state.speechEpoch && runIsCurrent(runId, lifecycleEpoch) && state.currentRun?.acceptingEvents) {
+					setPhase(state.sharedPlaybackActive ? "speaking" : "thinking");
+				}
 			}
 		});
 	}
@@ -984,11 +1066,29 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (!ownsCurrentRun() || !state.currentRun) return;
 		const runId = state.currentRun.id;
 		const lifecycleEpoch = state.lifecycleEpoch;
+		const speechEpoch = state.speechEpoch;
 		state.currentRun.acceptingEvents = false;
 		await Promise.resolve();
 		const pendingSpeech = state.speechTail;
 		try { await pendingSpeech; } catch {}
-		if (!runIsCurrent(runId, lifecycleEpoch)) return;
+		if (!runIsCurrent(runId, lifecycleEpoch) || speechEpoch !== state.speechEpoch) return;
+		if (state.sharedPlaybackActive) {
+			const pendingCompletion = state.speechCompletionTail;
+			try { await pendingCompletion; } catch {}
+			if (!runIsCurrent(runId, lifecycleEpoch) || speechEpoch !== state.speechEpoch) return;
+			try {
+				await dependencies.finishSpeech?.();
+			} catch (error) {
+				if ((error as Error)?.name !== "AbortError") {
+					notify(state.ctx, `Talk playback failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+				}
+			}
+			state.sharedPlaybackActive = false;
+			state.playbackActive = false;
+			state.speechTimingAbort = undefined;
+			state.speechCompletionTail = Promise.resolve();
+		}
+		if (!runIsCurrent(runId, lifecycleEpoch) || speechEpoch !== state.speechEpoch) return;
 		state.agentActive = false;
 		// Headphone and echo-cancelled modes intentionally keep the existing
 		// capture process alive through speech. Restore the externally visible
