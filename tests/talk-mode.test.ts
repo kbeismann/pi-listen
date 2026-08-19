@@ -157,6 +157,19 @@ describe("continuous talk mode", () => {
 		expect(TALK_SYSTEM_PROMPT).toContain("explicitly asks for a longer, detailed, or step-by-step answer");
 	});
 
+	test("renders talk mode as a high-contrast persistent footer badge", async () => {
+		const { context, mode } = makeHarness();
+
+		expect(await mode.enable(context as any)).toBe(true);
+		const activeStatus = context.statuses.get("continuous-talk");
+		expect(activeStatus).toStartWith("\x1b[1;30;103m");
+		expect(activeStatus).toContain("TALK MODE ON | LISTENING");
+		expect(activeStatus).toEndWith("\x1b[0m");
+
+		await mode.disable(context as any, { notify: false });
+		expect(context.statuses.get("continuous-talk")).toBeUndefined();
+	});
+
 	test("runs a local hands-free turn and restores the exact Pi state", async () => {
 		const { pi, captures, spoken, context, mode } = makeHarness();
 		const originalTools = [...pi.activeTools];

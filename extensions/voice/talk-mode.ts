@@ -54,6 +54,8 @@ interface UtteranceInterruption {
 }
 
 const STATUS_KEY = "continuous-talk";
+const TALK_STATUS_HIGHLIGHT = "\x1b[1;30;103m";
+const ANSI_RESET = "\x1b[0m";
 const INTERRUPTION_ENTRY_TYPE = "pi-listen-talk-interruption";
 const INTERRUPTED_AFTER_SPEECH = "[The user interrupted here; the remainder of the generated response was not heard.]";
 const INTERRUPTED_BEFORE_SPEECH = "[The user interrupted before any of this response was heard.]";
@@ -133,6 +135,20 @@ function isSubstantiveInterruption(text: string): boolean {
 }
 
 /**
+ * Render a persistent, high-contrast footer badge while talk mode owns the
+ * microphone and constrains Pi to read-only tools. The fixed ANSI palette is
+ * deliberate: a theme accent can blend into the surrounding footer, while a
+ * bright-yellow background with black text remains conspicuous across themes.
+ * The explicit ON label also keeps the state understandable without color.
+ */
+function formatTalkStatus(phase: Exclude<TalkPhase, "off">): string {
+	const stateLabel = phase === "starting" || phase === "stopping" || phase === "error"
+		? phase.toUpperCase()
+		: `ON | ${phase.toUpperCase()}`;
+	return `${TALK_STATUS_HIGHLIGHT} TALK MODE ${stateLabel} ${ANSI_RESET}`;
+}
+
+/**
  * Hands-free local-audio conversation controller.
  *
  * Capture remains active while the model is thinking so the user can add a
@@ -183,7 +199,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		const target = ctx ?? state.ctx;
 		if (!target?.hasUI || !target.ui?.setStatus) return;
 		if (phase === "off") target.ui.setStatus(STATUS_KEY, undefined);
-		else target.ui.setStatus(STATUS_KEY, `Talk: ${phase}`);
+		else target.ui.setStatus(STATUS_KEY, formatTalkStatus(phase));
 	}
 
 	function talkConfig(): ContinuousTalkConfig {
