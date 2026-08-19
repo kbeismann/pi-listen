@@ -248,6 +248,31 @@ describe("continuous talk mode", () => {
 		expect(mode.getPhase()).toBe("off");
 	});
 
+	test("allows exact read-only tools selected by a trusted integration", async () => {
+		const harness = makeHarness({
+			getAdditionalAllowedTools: () => ["pi_supervisor", "unknown_tool"],
+		});
+		harness.pi.allTools.push({ name: "pi_supervisor" });
+
+		expect(await harness.mode.enable(harness.context as any)).toBe(true);
+		expect(harness.pi.activeTools).toEqual([
+			"read",
+			"grep",
+			"find",
+			"ls",
+			"pi_supervisor",
+		]);
+		expect(
+			harness.mode.handleToolCall({ toolName: "pi_supervisor" }),
+		).toBeUndefined();
+		expect(harness.mode.handleToolCall({ toolName: "bash" })).toEqual({
+			block: true,
+			reason: "Talk mode is read-only; tool 'bash' is unavailable until /talk off.",
+		});
+
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
 	test("does not shape or speak a run that began before talk mode", async () => {
 		const { context, mode, spoken } = makeHarness();
 		expect(await mode.beginAgentRun("normal", context as any)).toBeUndefined();

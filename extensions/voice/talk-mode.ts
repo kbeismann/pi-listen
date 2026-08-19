@@ -10,8 +10,8 @@ import type { TalkAudioRoute } from "./pipewire-aec";
 import type { SpeechDetector } from "./sherpa-vad";
 import { prepareForSpeech } from "./tts-text-filter";
 
-type TalkContext = ExtensionContext | ExtensionCommandContext;
-type TalkPhase = "off" | "starting" | "listening" | "hearing" | "transcribing" | "thinking" | "speaking" | "stopping" | "error";
+export type TalkContext = ExtensionContext | ExtensionCommandContext;
+export type TalkPhase = "off" | "starting" | "listening" | "hearing" | "transcribing" | "thinking" | "speaking" | "stopping" | "error";
 
 export interface TalkCapture {
 	process: ChildProcess;
@@ -34,6 +34,8 @@ export interface TalkModeDependencies {
 		onPlaybackStart?: () => void,
 	): Promise<void>;
 	onAudioChunk?(chunk: Buffer): void;
+	getAdditionalAllowedTools?(): string[];
+	onStateChange?(): void;
 }
 
 interface TalkRun {
@@ -217,6 +219,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	function setPhase(phase: TalkPhase, ctx?: TalkContext): void {
 		state.phase = phase;
 		if (ctx) state.ctx = ctx;
+		dependencies.onStateChange?.();
 		const target = ctx ?? state.ctx;
 		if (!target?.hasUI || !target.ui) return;
 		if (phase === "off") {
@@ -354,7 +357,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	}
 
 	function effectiveAllowedTools(config: ContinuousTalkConfig): string[] {
-		const requested = config.allowedTools;
+		const requested = [
+			...config.allowedTools,
+			...(dependencies.getAdditionalAllowedTools?.() ?? []),
+		];
 		const allTools = typeof (pi as any).getAllTools === "function" ? (pi as any).getAllTools() : undefined;
 		if (!Array.isArray(allTools) || allTools.length === 0) return [...requested];
 		const known = new Set(allTools.map((tool: any) => tool?.name).filter((name: unknown) => typeof name === "string"));
@@ -638,7 +644,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		return modelRestored;
 	}
 
-	async function enable(ctx: ExtensionCommandContext): Promise<boolean> {
+	async function enable(ctx: TalkContext): Promise<boolean> {
 		state.ctx = ctx;
 		if (state.enabled || state.phase === "starting") {
 			notify(ctx, "Talk mode is already on.");

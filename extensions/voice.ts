@@ -92,6 +92,7 @@ import {
 	type LocalSession,
 } from "./voice/local";
 import { createTalkMode } from "./voice/talk-mode";
+import { installTalkIntegration } from "./voice/talk-integration";
 import { createPipeWireEchoCancellation } from "./voice/pipewire-aec";
 import { createSherpaSpeechDetector, prepareSherpaVad } from "./voice/sherpa-vad";
 
@@ -3220,6 +3221,8 @@ export default function (pi: ExtensionAPI) {
 	// always selects the configured local STT and TTS models and restores the
 	// exact Pi state on exit. Optional PipeWire routing exists only for the
 	// /talk lifecycle and is removed when the mode stops.
+	const talkSafeToolsByOwner = new Map<string, Set<string>>();
+	let publishTalkState = (): void => {};
 	const continuousTalk = createTalkMode(pi, {
 		getConfig: () => config,
 		spawnCapture: (audioRoute) => {
@@ -3318,7 +3321,21 @@ export default function (pi: ExtensionAPI) {
 			});
 		},
 		onAudioChunk: updateAudioLevel,
+		getAdditionalAllowedTools: () => [
+			...new Set(
+				[...talkSafeToolsByOwner.values()].flatMap((toolNames) => [
+					...toolNames,
+				]),
+			),
+		],
+		onStateChange: () => publishTalkState(),
 	});
+	const talkIntegration = installTalkIntegration(
+		pi,
+		continuousTalk,
+		talkSafeToolsByOwner,
+	);
+	publishTalkState = talkIntegration.publishState;
 	talkMode = continuousTalk;
 	pi.on("session_start", async (_event, eventCtx) => {
 		continuousTalk.restoreInterruptedContext(eventCtx);
