@@ -7,6 +7,7 @@ import type {
 import type { ContinuousTalkConfig, VoiceConfig } from "./config";
 import { createEnergyVad } from "./energy-vad";
 import type { TalkAudioRoute } from "./pipewire-aec";
+import type { SpeechDetector } from "./sherpa-vad";
 import { prepareForSpeech } from "./tts-text-filter";
 
 type TalkContext = ExtensionContext | ExtensionCommandContext;
@@ -21,6 +22,7 @@ export interface TalkModeDependencies {
 	getConfig(): VoiceConfig;
 	spawnCapture(audioRoute?: TalkAudioRoute): TalkCapture | null;
 	prepare(config: VoiceConfig, signal: AbortSignal): Promise<void>;
+	createSpeechDetector(config: VoiceConfig): SpeechDetector;
 	prepareAudio?(config: VoiceConfig, signal: AbortSignal): Promise<TalkAudioRoute>;
 	transcribe(pcm: Buffer, config: VoiceConfig): Promise<string>;
 	speak(
@@ -50,6 +52,8 @@ interface MessageStreamState {
 interface UtteranceInterruption {
 	verifyBeforeInterrupting: boolean;
 	interruptedImmediately: boolean;
+	energyConfirmed: boolean;
+	speechValidated: boolean;
 	confirmed: boolean;
 	beganDuringPlayback: boolean;
 }
@@ -195,6 +199,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		captureExitHandler: undefined as ((code: number | null, signal: NodeJS.Signals | null) => void) | undefined,
 		pcmRemainder: Buffer.alloc(0),
 		vad: undefined as ReturnType<typeof createEnergyVad> | undefined,
+		speechDetector: undefined as SpeechDetector | undefined,
 		prepareAbort: undefined as AbortController | undefined,
 		transcription: undefined as Promise<void> | undefined,
 		speechAbort: undefined as AbortController | undefined,
@@ -295,6 +300,28 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		return true;
 	}
 
+	function confirmValidatedUtterance(): void {
+		const utteranceInterruption = state.utteranceInterruption;
+		if (
+			!utteranceInterruption
+			|| utteranceInterruption.confirmed
+			|| !utteranceInterruption.energyConfirmed
+			|| !utteranceInterruption.speechValidated
+		) return;
+		utteranceInterruption.confirmed = true;
+		if (state.playbackActive || !utteranceInterruption.verifyBeforeInterrupting) {
+			utteranceInterruption.interruptedImmediately = interruptSpeechForBargeIn();
+		}
+	}
+
+	function validateCurrentUtteranceAsSpeech(): void {
+		const utteranceInterruption = state.utteranceInterruption;
+		if (!utteranceInterruption || utteranceInterruption.speechValidated) return;
+		utteranceInterruption.speechValidated = true;
+		setPhase("hearing");
+		confirmValidatedUtterance();
+	}
+
 	function handlePlaybackStart(): void {
 		state.playbackActive = true;
 		const utteranceInterruption = state.utteranceInterruption;
@@ -309,6 +336,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.bargeInGuardUntil = Date.now() + talkConfig().bargeIn.guardMs;
 		state.utteranceInterruption = undefined;
 		state.vad?.reset();
+		state.speechDetector?.reset();
 	}
 
 	async function closeAudioRoute(ctx?: TalkContext): Promise<boolean> {
@@ -347,7 +375,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 
 	function stopCapture(signal: NodeJS.Signals = "SIGKILL"): void {
 		const capture = state.capture;
-		if (!capture) return;
+		if (!capture) {
+			state.speechDetector?.reset();
+			return;
+		}
 		state.capture = undefined;
 		if (state.captureDataHandler) capture.process.stdout?.off("data", state.captureDataHandler);
 		if (state.captureErrorHandler) capture.process.off("error", state.captureErrorHandler);
@@ -358,6 +389,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.pcmRemainder = Buffer.alloc(0);
 		state.utteranceInterruption = undefined;
 		state.vad?.reset();
+		state.speechDetector?.reset();
 		try { capture.process.kill(signal); } catch {}
 	}
 
@@ -368,7 +400,13 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	}
 
 	function consumeCaptureChunk(capture: TalkCapture, chunk: Buffer, epoch: number): void {
-		if (!state.enabled || state.capture !== capture || state.lifecycleEpoch !== epoch || !state.vad) return;
+		if (
+			!state.enabled
+			|| state.capture !== capture
+			|| state.lifecycleEpoch !== epoch
+			|| !state.vad
+			|| !state.speechDetector
+		) return;
 		dependencies.onAudioChunk?.(chunk);
 		const combined = state.pcmRemainder.length > 0
 			? Buffer.concat([state.pcmRemainder, chunk])
@@ -380,40 +418,55 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			const frame = combined.subarray(offset, offset + frameBytes);
 			offset += frameBytes;
 			if (Date.now() < state.bargeInGuardUntil) continue;
+			let neuralSpeechDetected: boolean;
+			try {
+				neuralSpeechDetected = state.speechDetector.pushFrame(frame);
+			} catch (error) {
+				void failAndStop(new Error(`Neural speech detection failed: ${error instanceof Error ? error.message : String(error)}`));
+				return;
+			}
+			if (neuralSpeechDetected) validateCurrentUtteranceAsSpeech();
 			for (const event of state.vad.pushFrame(frame)) {
 				if (event.type === "speech_start") {
 					const duringPlayback = state.playbackActive;
 					state.utteranceInterruption = {
 						// During model-only thinking, wait for local transcription so
-						// room noise and conversational backchannels cannot kill a run.
+						// conversational backchannels do not suppress the current response.
 						verifyBeforeInterrupting: bargeInEnabled() && state.agentActive && !duringPlayback,
 						interruptedImmediately: false,
+						energyConfirmed: false,
+						speechValidated: false,
 						confirmed: false,
 						beganDuringPlayback: duringPlayback,
 					};
-					setPhase("hearing");
+					if (neuralSpeechDetected) validateCurrentUtteranceAsSpeech();
 				}
 				if (event.type === "speech_confirmed") {
-					if (state.utteranceInterruption) state.utteranceInterruption.confirmed = true;
-					if (state.playbackActive || !state.utteranceInterruption?.verifyBeforeInterrupting) {
-						if (state.utteranceInterruption) {
-							state.utteranceInterruption.interruptedImmediately = interruptSpeechForBargeIn();
-						} else {
-							interruptSpeechForBargeIn();
-						}
-					}
+					if (state.utteranceInterruption) state.utteranceInterruption.energyConfirmed = true;
+					confirmValidatedUtterance();
 				}
 				if (event.type === "discarded") {
 					state.utteranceInterruption = undefined;
+					state.speechDetector.reset();
 					restorePhaseAfterIgnoredAudio();
 				}
 				if (event.type === "speech_end") {
 					const utteranceInterruption = state.utteranceInterruption;
+					if (!utteranceInterruption?.speechValidated) {
+						// Energy alone also reacts to breathing, keyboard noise, and audio
+						// leakage. Never send those segments to an ASR model that could turn
+						// ambiguous sound into a confident-looking command.
+						state.utteranceInterruption = undefined;
+						state.speechDetector.reset();
+						restorePhaseAfterIgnoredAudio();
+						continue;
+					}
 					if (utteranceInterruption?.beganDuringPlayback && !utteranceInterruption.confirmed) {
 						// Playback-time audio is an interruption gesture, not a second
 						// user-input channel. Ignore speech that ends before the configured
 						// continuous-speech threshold instead of steering with a backchannel.
 						state.utteranceInterruption = undefined;
+						state.speechDetector.reset();
 						restorePhaseAfterIgnoredAudio();
 						continue;
 					}
@@ -434,7 +487,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	}
 
 	function startCapture(ctx?: TalkContext, options: { stopModeOnFailure?: boolean } = { stopModeOnFailure: true }): boolean {
-		if (!state.enabled || state.capture) return false;
+		if (!state.enabled || state.capture || !state.speechDetector) return false;
 		const epoch = state.lifecycleEpoch;
 		let capture: TalkCapture | null;
 		try {
@@ -458,12 +511,22 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			thresholdDb: vadConfig.thresholdDb,
 			hangoverMs: vadConfig.hangoverMs,
 			minSpeechMs: vadConfig.minSpeechMs,
-			// Never abort a model run for audio that normal endpoint validation
-			// would later discard as too short.
+			// Do not cancel TTS for audio that endpoint validation would later
+			// discard as too short.
 			confirmationMs: Math.max(talkConfig().bargeIn.minSpeechMs, vadConfig.minSpeechMs),
 			maxUtteranceMs: vadConfig.maxUtteranceMs,
 			preRollMs: vadConfig.preRollMs,
 		});
+		if (state.speechDetector.frameBytes !== state.vad.frameBytes) {
+			try { capture.process.kill("SIGKILL"); } catch {}
+			if (options.stopModeOnFailure !== false) {
+				void failAndStop(new Error(
+					`Speech detectors disagree on frame size (${state.speechDetector.frameBytes} and ${state.vad.frameBytes} bytes).`,
+				));
+			}
+			return false;
+		}
+		state.speechDetector.reset();
 		state.pcmRemainder = Buffer.alloc(0);
 		state.capture = capture;
 		state.captureDataHandler = (chunk: Buffer) => consumeCaptureChunk(capture, chunk, epoch);
@@ -607,6 +670,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			if (state.lifecycleEpoch !== epoch || state.prepareAbort.signal.aborted) throw makeAbortError();
 			await dependencies.prepare(state.config, state.prepareAbort.signal);
 			if (state.lifecycleEpoch !== epoch || state.prepareAbort.signal.aborted) throw makeAbortError();
+			state.speechDetector = dependencies.createSpeechDetector(state.config);
 			if (state.config.talk.bargeIn.mode === "pipewire-aec") {
 				try {
 					if (!dependencies.prepareAudio) throw new Error("The PipeWire audio adapter is unavailable.");
@@ -642,6 +706,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		} catch (error) {
 			state.enabled = false;
 			stopCapture("SIGKILL");
+			state.speechDetector = undefined;
 			await closeAudioRoute(ctx);
 			await restorePiState(ctx);
 			state.targetModel = undefined;
@@ -679,6 +744,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		cancelSpeechQueue();
 		state.speechAbort = undefined;
 		stopCapture("SIGKILL");
+		state.speechDetector = undefined;
 		state.messageStreams.clear();
 		try { await state.speechTail; } catch {}
 		if (options.awaitTranscription && state.transcription) {
@@ -960,6 +1026,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		return [
 			`Talk mode: ${state.enabled ? state.phase : "off"}`,
 			`STT: local ${config.sttModel}`,
+			"speech validation: local Silero VAD",
 			`TTS: local ${config.ttsModel}, voice ${config.ttsVoiceId}`,
 			`model: ${config.modelProvider && config.modelId ? `${config.modelProvider}/${config.modelId}` : "current"}`,
 			`thinking: ${config.thinkingLevel}`,

@@ -27,6 +27,11 @@ describe("sherpa-onnx-node Bun compatibility", () => {
 		expect(typeof sherpa.OnlineRecognizer).toBe("function");
 	});
 
+	test("sherpa-onnx-node exports neural VAD support", () => {
+		const sherpa = require("sherpa-onnx-node");
+		expect(typeof sherpa.Vad).toBe("function");
+	});
+
 	test("sherpa-onnx-node loads via ESM dynamic import()", async () => {
 		const sherpa = await import("sherpa-onnx-node");
 		expect(sherpa).toBeDefined();

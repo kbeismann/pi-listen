@@ -93,6 +93,7 @@ import {
 } from "./voice/local";
 import { createTalkMode } from "./voice/talk-mode";
 import { createPipeWireEchoCancellation } from "./voice/pipewire-aec";
+import { createSherpaSpeechDetector, prepareSherpaVad } from "./voice/sherpa-vad";
 
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -3269,6 +3270,8 @@ export default function (pi: ExtensionAPI) {
 			};
 			await prepareLocalTranscriber(sttConfig);
 			if (signal.aborted) throw new DOMException("Talk setup aborted", "AbortError");
+			await prepareSherpaVad(signal);
+			if (signal.aborted) throw new DOMException("Talk setup aborted", "AbortError");
 
 			const { ensureTtsModelInstalled, getInstalledTtsModelDir, getTtsModel } = await import("./voice/tts-local-models");
 			const { warmupTts } = await import("./voice/tts-engine");
@@ -3280,6 +3283,11 @@ export default function (pi: ExtensionAPI) {
 				throw new Error(`Could not initialize local TTS model ${model.id}.`);
 			}
 		},
+		createSpeechDetector: (voiceConfig) => createSherpaSpeechDetector({
+			minSpeechMs: voiceConfig.talk.vad.minSpeechMs,
+			minSilenceMs: voiceConfig.talk.vad.hangoverMs,
+			maxSpeechMs: voiceConfig.talk.vad.maxUtteranceMs,
+		}),
 		transcribe: async (pcm, voiceConfig) => {
 			const sttConfig: VoiceConfig = {
 				...voiceConfig,

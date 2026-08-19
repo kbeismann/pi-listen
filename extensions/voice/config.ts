@@ -44,7 +44,7 @@ export interface ContinuousTalkConfig {
 		minSpeechMs: number;
 		guardMs: number;
 	};
-	/** Energy-VAD endpointing. Lower hangover is faster but can split hesitant speech. */
+	/** Energy endpointing after local neural VAD validates that the sound is speech. */
 	vad: {
 		startDb: number;
 		thresholdDb?: number;

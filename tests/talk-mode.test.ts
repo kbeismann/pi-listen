@@ -129,6 +129,19 @@ function feedInOddChunks(capture: FakeCaptureProcess, audio: Buffer): void {
 	}
 }
 
+function createToneSpeechDetector() {
+	return {
+		frameBytes: 1_024,
+		pushFrame(frame: Buffer): boolean {
+			for (let offset = 0; offset < frame.length; offset += 2) {
+				if (Math.abs(frame.readInt16LE(offset)) >= 1_000) return true;
+			}
+			return false;
+		},
+		reset() {},
+	};
+}
+
 function makeHarness(options: Partial<TalkModeDependencies> = {}) {
 	const pi = new MockPi();
 	const config = makeConfig();
@@ -144,6 +157,7 @@ function makeHarness(options: Partial<TalkModeDependencies> = {}) {
 			return { process, tool: "fake" } as unknown as TalkCapture;
 		},
 		prepare: async () => {},
+		createSpeechDetector: createToneSpeechDetector,
 		transcribe: async () => "hello from the local microphone",
 		speak: async (text) => { spoken.push(text); },
 		...options,
@@ -611,7 +625,7 @@ describe("continuous talk mode", () => {
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
-	test("headphone barge-in does not abort audio too short for transcription", async () => {
+	test("headphone barge-in does not cancel TTS for audio too short for transcription", async () => {
 		const harness = makeHarness();
 		harness.config.talk.bargeIn.mode = "headphones";
 		harness.config.talk.bargeIn.minSpeechMs = 100;
@@ -627,6 +641,50 @@ describe("continuous talk mode", () => {
 
 		expect(harness.context.abortCount).toBe(0);
 		expect(harness.pi.sentMessages).toEqual([]);
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("neural VAD rejects energetic non-speech before interruption and STT", async () => {
+		let speechCancelled = false;
+		let transcriptionCount = 0;
+		const harness = makeHarness({
+			createSpeechDetector: () => ({
+				frameBytes: 1_024,
+				pushFrame: () => false,
+				reset() {},
+			}),
+			transcribe: async () => {
+				transcriptionCount += 1;
+				return "invented speech";
+			},
+			speak: async (_text, _config, _ctx, signal, _audioRoute, onPlaybackStart) => new Promise<void>((_resolve, reject) => {
+				onPlaybackStart?.();
+				const cancel = () => {
+					speechCancelled = true;
+					const error = new Error("cancelled");
+					error.name = "AbortError";
+					reject(error);
+				};
+				if (signal.aborted) cancel();
+				else signal.addEventListener("abort", cancel, { once: true });
+			}),
+		});
+		harness.config.talk.bargeIn.mode = "headphones";
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: { id: "answer", role: "assistant", content: [{ type: "text", text: "Keep speaking through non-speech noise." }] },
+		});
+		await Bun.sleep(5);
+
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(10);
+
+		expect(speechCancelled).toBe(false);
+		expect(transcriptionCount).toBe(0);
+		expect(harness.pi.sentMessages).toEqual([]);
+		expect(harness.mode._state.currentRun?.acceptingEvents).toBe(true);
+		expect(harness.mode.getPhase()).toBe("speaking");
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
