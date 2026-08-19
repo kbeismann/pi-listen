@@ -54,7 +54,7 @@ interface UtteranceInterruption {
 }
 
 const STATUS_KEY = "continuous-talk";
-const TALK_STATUS_HIGHLIGHT = "\x1b[1;30;103m";
+const TALK_MODE_HIGHLIGHT = "\x1b[0;1;38;2;0;0;0;48;2;255;0;255m";
 const ANSI_RESET = "\x1b[0m";
 const INTERRUPTION_ENTRY_TYPE = "pi-listen-talk-interruption";
 const INTERRUPTED_AFTER_SPEECH = "[The user interrupted here; the remainder of the generated response was not heard.]";
@@ -134,18 +134,32 @@ function isSubstantiveInterruption(text: string): boolean {
 	return !normalized.split(/\s+/).every((word) => NON_INTERRUPTING_TALK_WORDS.has(word));
 }
 
-/**
- * Render a persistent, high-contrast footer badge while talk mode owns the
- * microphone and constrains Pi to read-only tools. The fixed ANSI palette is
- * deliberate: a theme accent can blend into the surrounding footer, while a
- * bright-yellow background with black text remains conspicuous across themes.
- * The explicit ON label also keeps the state understandable without color.
- */
-function formatTalkStatus(phase: Exclude<TalkPhase, "off">): string {
-	const stateLabel = phase === "starting" || phase === "stopping" || phase === "error"
+function talkStateLabel(phase: Exclude<TalkPhase, "off">): string {
+	return phase === "starting" || phase === "stopping" || phase === "error"
 		? phase.toUpperCase()
 		: `ON | ${phase.toUpperCase()}`;
-	return `${TALK_STATUS_HIGHLIGHT} TALK MODE ${stateLabel} ${ANSI_RESET}`;
+}
+
+/**
+ * Keep a text badge for non-TUI clients, and replace Pi's normal footer with a
+ * full-width banner in the interactive TUI. The fixed true-color neon magenta is
+ * deliberately independent of the active theme so talk mode's microphone
+ * ownership and read-only tool constraints are unmistakable at a glance.
+ */
+function formatTalkStatus(phase: Exclude<TalkPhase, "off">): string {
+	return `${TALK_MODE_HIGHLIGHT} TALK MODE ${talkStateLabel(phase)} ${ANSI_RESET}`;
+}
+
+function formatTalkFooterLine(phase: Exclude<TalkPhase, "off">, width: number): string {
+	const targetWidth = Math.max(0, Math.floor(width));
+	if (targetWidth === 0) return "";
+	const label = ` TALK MODE ${talkStateLabel(phase)} `;
+	const visibleLabel = label.slice(0, targetWidth);
+	const availablePadding = targetWidth - visibleLabel.length;
+	const leftPadding = Math.floor(availablePadding / 2);
+	const rightPadding = availablePadding - leftPadding;
+	const line = `${" ".repeat(leftPadding)}${visibleLabel}${" ".repeat(rightPadding)}`;
+	return `${TALK_MODE_HIGHLIGHT}${line}${ANSI_RESET}`;
 }
 
 /**
@@ -160,6 +174,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	const state = {
 		enabled: false,
 		phase: "off" as TalkPhase,
+		talkFooterActive: false,
 		lifecycleEpoch: 0,
 		runCounter: 0,
 		currentRun: undefined as TalkRun | undefined,
@@ -197,9 +212,26 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.phase = phase;
 		if (ctx) state.ctx = ctx;
 		const target = ctx ?? state.ctx;
-		if (!target?.hasUI || !target.ui?.setStatus) return;
-		if (phase === "off") target.ui.setStatus(STATUS_KEY, undefined);
-		else target.ui.setStatus(STATUS_KEY, formatTalkStatus(phase));
+		if (!target?.hasUI || !target.ui) return;
+		if (phase === "off") {
+			if (state.talkFooterActive) {
+				target.ui.setFooter(undefined);
+				state.talkFooterActive = false;
+			}
+			target.ui.setStatus(STATUS_KEY, undefined);
+			return;
+		}
+		if (!state.talkFooterActive) {
+			target.ui.setFooter(() => ({
+				invalidate() {},
+				render(width: number): string[] {
+					const visiblePhase = state.phase === "off" ? "stopping" : state.phase;
+					return [formatTalkFooterLine(visiblePhase, width)];
+				},
+			}));
+			state.talkFooterActive = true;
+		}
+		target.ui.setStatus(STATUS_KEY, formatTalkStatus(phase));
 	}
 
 	function talkConfig(): ContinuousTalkConfig {

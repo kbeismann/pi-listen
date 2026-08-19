@@ -71,6 +71,7 @@ function makeConfig(): VoiceConfig {
 function makeContext(pi: MockPi) {
 	const notifications: Array<{ message: string; level: string }> = [];
 	const statuses = new Map<string, string | undefined>();
+	const footerUpdates: any[] = [];
 	let abortCount = 0;
 	return {
 		hasUI: true,
@@ -92,9 +93,11 @@ function makeContext(pi: MockPi) {
 		ui: {
 			notify(message: string, level: string) { notifications.push({ message, level }); },
 			setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
+			setFooter(factory: any) { footerUpdates.push(factory); },
 		},
 		notifications,
 		statuses,
+		footerUpdates,
 		get abortCount() { return abortCount; },
 	};
 }
@@ -157,17 +160,33 @@ describe("continuous talk mode", () => {
 		expect(TALK_SYSTEM_PROMPT).toContain("explicitly asks for a longer, detailed, or step-by-step answer");
 	});
 
-	test("renders talk mode as a high-contrast persistent footer badge", async () => {
+	test("renders talk mode as a full-width neon-magenta footer", async () => {
 		const { context, mode } = makeHarness();
 
 		expect(await mode.enable(context as any)).toBe(true);
 		const activeStatus = context.statuses.get("continuous-talk");
-		expect(activeStatus).toStartWith("\x1b[1;30;103m");
+		expect(activeStatus).toStartWith("\x1b[0;1;38;2;0;0;0;48;2;255;0;255m");
 		expect(activeStatus).toContain("TALK MODE ON | LISTENING");
 		expect(activeStatus).toEndWith("\x1b[0m");
 
+		const footerFactory = context.footerUpdates.find((update) => typeof update === "function");
+		const footer = footerFactory({}, {}, {});
+		const footerLine = footer.render(72)[0];
+		const plainFooterLine = footerLine.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(footerLine).toStartWith("\x1b[0;1;38;2;0;0;0;48;2;255;0;255m");
+		expect(footerLine).toEndWith("\x1b[0m");
+		expect(plainFooterLine).toHaveLength(72);
+		expect(plainFooterLine.trim()).toBe("TALK MODE ON | LISTENING");
+		expect(context.footerUpdates).toHaveLength(1);
+
+		mode.handleInput(context as any);
+		const thinkingLine = footer.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "");
+		expect(thinkingLine.trim()).toBe("TALK MODE ON | THINKING");
+		expect(context.footerUpdates).toHaveLength(1);
+
 		await mode.disable(context as any, { notify: false });
 		expect(context.statuses.get("continuous-talk")).toBeUndefined();
+		expect(context.footerUpdates.at(-1)).toBeUndefined();
 	});
 
 	test("runs a local hands-free turn and restores the exact Pi state", async () => {
