@@ -164,9 +164,9 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 ### Hands-free conversation
 
-`/talk on` starts an automatic conversation loop. Speak normally; inexpensive energy detection buffers and endpoints the audio, while a local Silero neural VAD must validate actual speech before Parakeet can transcribe it. Pi answers, and Kokoro speaks the answer locally. The small Silero model is downloaded automatically with no account or API key. The microphone listens while Pi is thinking and between turns, so no key is held or pressed. `/talk off` immediately stops capture and playback.
+`/talk on` starts an automatic conversation loop. Speak normally; inexpensive energy detection buffers and endpoints the audio, while a local Silero neural VAD must validate actual speech before Parakeet can transcribe it. Pi answers, and the configured local TTS model speaks the answer. The speech models download automatically with no metered API. The microphone listens while Pi is thinking and between turns, so no key is held or pressed. `/talk off` immediately stops capture and playback.
 
-Talk mode defaults to speaker-safe playback. It closes microphone capture before Kokoro plays audio, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback. Continuous speech cancels playback after `bargeIn.minSpeechMs`; it never aborts the current model run or tool work. Shorter playback-time utterances are ignored rather than submitted as steering. The completed utterance is transcribed after the user stops speaking and queued as steering for Pi's next safe agent boundary. While the model is only thinking, `/talk` first finishes and transcribes the utterance locally; empty captures and brief backchannels such as “mm-hmm” leave the response running. On Linux, `pipewire-aec` instead creates a temporary WebRTC echo-cancellation source and sink for `/talk`, allowing the same interruption behavior over speakers. If the route cannot be created, talk mode reports the failure and falls back to speaker-safe playback. Microphone audio never leaves the machine; only the resulting text is sent to the configured Pi model.
+Talk mode defaults to speaker-safe playback. It closes microphone capture before TTS playback, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback. Continuous speech cancels playback after `bargeIn.minSpeechMs`; it never aborts the current model run or tool work. Shorter playback-time utterances are ignored rather than submitted as steering. The completed utterance is transcribed after the user stops speaking and queued as steering for Pi's next safe agent boundary. While the model is only thinking, `/talk` first finishes and transcribes the utterance locally; empty captures and brief backchannels such as “mm-hmm” leave the response running. On Linux, `pipewire-aec` instead creates a temporary WebRTC echo-cancellation source and sink for `/talk`, allowing the same interruption behavior over speakers. If the route cannot be created, talk mode reports the failure and falls back to speaker-safe playback. Microphone audio never leaves the machine; only the resulting text is sent to the configured Pi model.
 
 The mode is isolated from ordinary Pi turns:
 
@@ -206,6 +206,8 @@ The defaults use `parakeet-v3`, `kokoro-en-v0_19`, and low thinking. Set a dedic
   }
 }
 ```
+
+For CPU-oriented conversational English, set `ttsModel` to `pocket-tts-int8-en-2026-01-26`. The first use downloads the pinned [sherpa-onnx export](https://k2-fsa.github.io/sherpa/onnx/tts/pocket.html) of [Kyutai Pocket TTS](https://github.com/kyutai-labs/pocket-tts), verifies its SHA-256, and conditions generation on the bundled Bria reference recording. The exported archive includes a non-commercial-use notice in addition to its CC BY 4.0 license; review those terms before using generated speech outside personal or evaluation contexts.
 
 ### v7.1 keyboard
 

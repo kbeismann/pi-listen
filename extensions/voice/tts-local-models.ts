@@ -12,8 +12,8 @@
  * Sherpa-onnx-node OfflineTts supports five model "slots" (verified in
  * node_modules/sherpa-onnx-node/types.js OfflineTtsModelConfig):
  *   vits | matcha | kokoro | kitten | pocket
- * We use kitten (Kitten Nano), vits (every Piper voice), and kokoro (the two
- * Kokoro entries). Pocket is voice cloning — different use case, out of scope.
+ * We use kitten (Kitten Nano), vits (every Piper voice), kokoro, and Pocket
+ * TTS with a bundled reference voice for conversational CPU synthesis.
  *
  * Why .tar.bz2 archives instead of individual .onnx URLs (like the STT path):
  * sherpa-onnx publishes each TTS model as a single archive containing the
@@ -41,10 +41,17 @@ const TTS_RELEASE = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts
  * Sherpa-onnx model slot. Maps directly to OfflineTtsModelConfig in
  * sherpa-onnx-node — the engine dispatches on this in tts-engine.ts.
  */
-export type TtsSherpaSlot = "kitten" | "vits" | "kokoro";
+export type TtsSherpaSlot = "kitten" | "vits" | "kokoro" | "pocket";
+
+export interface TtsPocketConfig {
+	/** Reference recording inside the extracted model archive. */
+	referenceAudioFile: string;
+	/** Consistency steps used for quality-oriented local generation. */
+	generationSteps: number;
+}
 
 export interface TtsVoice {
-	/** Sherpa speaker id (numeric). Passed as `sid` to OfflineTts.generate(). */
+	/** Sherpa speaker id for fixed-voice models; zero-shot models may ignore it. */
 	sid: number;
 	/** Display name shown in the voice picker. */
 	name: string;
@@ -102,6 +109,8 @@ export interface TtsLocalModelInfo {
 	archiveSha256?: string;
 	/** Sample rate (Hz) of generated audio. Drives WAV header on playback. */
 	sampleRate: number;
+	/** Pocket-specific voice conditioning. Required when sherpaSlot is pocket. */
+	pocket?: TtsPocketConfig;
 	/**
 	 * v7.1.2 — runtime incompatibility marker. When the model is known
 	 * to fail with the currently-installed `sherpa-onnx-node` (e.g.
@@ -162,7 +171,37 @@ export const TTS_LOCAL_MODELS: TtsLocalModelInfo[] = [
 	},
 
 	// ═══════════════════════════════════════════════════════════════════════
-	// TIER 1 — Per-language Piper voices (each ~20 MB)
+	// TIER 1 — CPU conversational speech with a bundled reference voice
+	// ═══════════════════════════════════════════════════════════════════════
+	{
+		id: "pocket-tts-int8-en-2026-01-26",
+		name: "Pocket TTS English (int8)",
+		size: "~94 MB",
+		sizeBytes: 98_336_520,
+		runtimeRamMB: 700,
+		notes: "100M-parameter CPU conversational TTS — bundled Bria reference voice, 24 kHz",
+		languages: ["en"],
+		tier: "standard",
+		preferred: false,
+		accuracy: 5,
+		speed: 4,
+		// The archive carries CC-BY-4.0 text and an additional README notice
+		// limiting this exported bundle to non-commercial use.
+		license: "CC-BY-4.0 (non-commercial export notice)",
+		sherpaSlot: "pocket",
+		voices: [{ sid: 0, name: "Bria (bundled reference)", gender: "neutral" }],
+		defaultSid: 0,
+		archiveUrl: `${TTS_RELEASE}/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2`,
+		archiveSha256: "2f3b88823cbbb9bf0b2477ec8ae7b3fec417b3a87b6bb5f256dba66f2ad967cb",
+		sampleRate: 24000,
+		pocket: {
+			referenceAudioFile: "test_wavs/bria.wav",
+			generationSteps: 5,
+		},
+	},
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// TIER 2 — Per-language Piper voices (each ~20 MB)
 	// ═══════════════════════════════════════════════════════════════════════
 	piper("en_US-lessac-medium-int8", "Piper Lessac (en-US)", 20_971_520, ["en-US"], "Clear American voice — solid technical-prose default", "MIT", true, 22050),
 	piper("en_US-amy-medium-int8", "Piper Amy (en-US)", 21_065_728, ["en-US"], "Female American voice", "MIT", false, 22050, "female"),
@@ -180,7 +219,7 @@ export const TTS_LOCAL_MODELS: TtsLocalModelInfo[] = [
 	piper("nl_NL-pim-medium-int8", "Piper Pim (nl-NL)", 21_065_728, ["nl-NL"], "Dutch, male voice", "MIT", false, 22050, "male"),
 
 	// ═══════════════════════════════════════════════════════════════════════
-	// TIER 2 — Multilingual + English HQ (Kokoro family, opt-in due to size)
+	// TIER 3 — Multilingual + English HQ (Kokoro family, opt-in due to size)
 	// ═══════════════════════════════════════════════════════════════════════
 	{
 		id: "kokoro-int8-multi-lang-v1_0",
@@ -634,15 +673,30 @@ export function getTtsModelDir(modelId: string): string {
 	return path.join(getTtsModelsDir(), modelId);
 }
 
+/** Files whose presence proves that a model archive was fully extracted. */
+export function getTtsInstallMarkerFiles(model: TtsLocalModelInfo): string[] {
+	if (model.sherpaSlot === "pocket") {
+		const referenceAudioFile = model.pocket?.referenceAudioFile;
+		if (!referenceAudioFile) {
+			throw new Error(`Pocket TTS model ${model.id} has no reference audio configured.`);
+		}
+		return [
+			"lm_flow.int8.onnx",
+			"lm_main.int8.onnx",
+			referenceAudioFile,
+		];
+	}
+	return ["tokens.txt"];
+}
+
 /** True iff the model archive has been downloaded and extracted. */
 export function isTtsModelInstalled(modelId: string): boolean {
 	const dir = getTtsModelDir(modelId);
 	if (!fs.existsSync(dir)) return false;
-	const tokens = path.join(dir, "tokens.txt");
-	// Every supported slot (kitten/vits/kokoro) ships a tokens.txt at
-	// the archive root, so its presence is a robust install marker
-	// without us needing to know the slot's other expected files.
-	return fs.existsSync(tokens);
+	const model = getTtsModel(modelId);
+	return getTtsInstallMarkerFiles(model).every((relativePath) =>
+		fs.existsSync(path.join(dir, relativePath))
+	);
 }
 
 /**

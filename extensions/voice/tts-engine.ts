@@ -61,6 +61,8 @@ interface CachedTts {
 	tts: OfflineTts;
 	sampleRate: number;
 	numSpeakers: number;
+	/** Pocket TTS conditions every generation on one cached reference waveform. */
+	pocketReference?: { samples: Float32Array; sampleRate: number };
 	/**
 	 * Per-instance synthesis serialization tail. Two concurrent
 	 * `synthesize()` calls against the same OfflineTts handle would (a)
@@ -221,6 +223,21 @@ async function doCreateTts(model: TtsLocalModelInfo, modelDir: string): Promise<
 	const sherpa = getSherpaModule();
 	const config = buildTtsConfig(model, modelDir);
 	const tts = await sherpa.OfflineTts.createAsync(config);
+	let pocketReference: CachedTts["pocketReference"];
+	if (model.sherpaSlot === "pocket") {
+		const referenceAudioFile = model.pocket?.referenceAudioFile;
+		if (!referenceAudioFile) {
+			throw new Error(`Pocket TTS model ${model.id} has no reference audio configured.`);
+		}
+		const wave = sherpa.readWave(path.join(modelDir, referenceAudioFile));
+		if (!wave?.samples?.length || !Number.isFinite(wave.sampleRate) || wave.sampleRate <= 0) {
+			throw new Error(`Could not read Pocket TTS reference audio for ${model.id}.`);
+		}
+		pocketReference = {
+			samples: wave.samples,
+			sampleRate: wave.sampleRate,
+		};
+	}
 	return {
 		modelId: model.id,
 		tts,
@@ -229,6 +246,7 @@ async function doCreateTts(model: TtsLocalModelInfo, modelDir: string): Promise<
 		// back to the catalog entry to keep this resilient across versions.
 		sampleRate: typeof tts.sampleRate === "number" ? tts.sampleRate : model.sampleRate,
 		numSpeakers: typeof tts.numSpeakers === "number" ? tts.numSpeakers : model.voices.length,
+		...(pocketReference ? { pocketReference } : {}),
 		generateChain: Promise.resolve(),
 	};
 }
@@ -351,7 +369,8 @@ export async function synthesize(opts: SynthesizeOpts): Promise<TtsAudio> {
 		}
 
 		// 5. Compute generate() args.
-		// We use the LEGACY generateAsync({ text, sid, speed }) shape
+		// Existing fixed-voice models use the LEGACY
+		// generateAsync({ text, sid, speed }) shape
 		// because it works on every sherpa-onnx-node release we've
 		// tested (1.12.29 + 1.13.0). Two upstream bugs informed this:
 		//   (a) generateAsync({ generationConfig }) threw
@@ -369,6 +388,9 @@ export async function synthesize(opts: SynthesizeOpts): Promise<TtsAudio> {
 		// sentences — that the missing progress is invisible).
 		// Future: when bug (b) is fixed upstream, re-enable
 		// onProgress + GenerationConfig together for streaming UI.
+		// Pocket TTS is the exception: zero-shot voice conditioning requires
+		// GenerationConfig.referenceAudio. It still omits onProgress, so it does
+		// not enter the unsafe background-thread callback path described above.
 		const sid = clampSid(opts.sid ?? model.defaultSid, model);
 		const speed = clampSpeed(opts.speed ?? 1.0);
 
@@ -383,7 +405,25 @@ export async function synthesize(opts: SynthesizeOpts): Promise<TtsAudio> {
 
 		let audio: { samples: Float32Array; sampleRate?: number };
 		try {
-			audio = await cached.tts.generateAsync({ text, sid, speed });
+			if (model.sherpaSlot === "pocket") {
+				const reference = cached.pocketReference;
+				if (!reference) throw new Error(`Pocket TTS reference audio is unavailable for ${model.id}.`);
+				const sherpa = getSherpaModule();
+				const generationConfig = new sherpa.GenerationConfig({
+					speed,
+					referenceAudio: reference.samples,
+					referenceSampleRate: reference.sampleRate,
+					numSteps: model.pocket?.generationSteps ?? 5,
+					extra: { max_reference_audio_len: 12, seed: 42 },
+				});
+				audio = await cached.tts.generateAsync({
+					text,
+					enableExternalBuffer: true,
+					generationConfig,
+				});
+			} else {
+				audio = await cached.tts.generateAsync({ text, sid, speed });
+			}
 		} finally {
 			// Always release the chain so subsequent synthesize() calls
 			// can proceed, even if generateAsync threw.
@@ -553,6 +593,25 @@ function buildTtsConfig(model: TtsLocalModelInfo, modelDir: string): any {
 				provider: "cpu",
 			};
 		}
+		case "pocket": {
+			return {
+				model: {
+					pocket: {
+						lmFlow: path.join(modelDir, "lm_flow.int8.onnx"),
+						lmMain: path.join(modelDir, "lm_main.int8.onnx"),
+						encoder: path.join(modelDir, "encoder.onnx"),
+						decoder: path.join(modelDir, "decoder.int8.onnx"),
+						textConditioner: path.join(modelDir, "text_conditioner.onnx"),
+						vocabJson: path.join(modelDir, "vocab.json"),
+						tokenScoresJson: path.join(modelDir, "token_scores.json"),
+						voiceEmbeddingCacheCapacity: 8,
+					},
+				},
+				maxNumSentences: 1,
+				numThreads,
+				provider: "cpu",
+			};
+		}
 	}
 }
 
@@ -578,6 +637,8 @@ function getTtsThreads(slot: TtsLocalModelInfo["sherpaSlot"]): number {
 	//   - vits   (Piper):           single-speaker VITS, scales to 4
 	//   - kokoro (Kokoro v0.19/v1.0): larger transformer encoder, scales
 	//                                 to ~6 P-cores on M-series
+	//   - pocket (Pocket TTS):        upstream targets two CPU cores
+	if (slot === "pocket") return Math.min(2, cpus - 2);
 	const max = slot === "kokoro" ? 6 : 4;
 	return Math.min(max, cpus - 2);
 }

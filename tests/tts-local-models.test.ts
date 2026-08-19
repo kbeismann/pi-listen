@@ -4,6 +4,7 @@ import {
 	DEFAULT_TTS_MODEL,
 	getTtsModel,
 	getDefaultVoiceSid,
+	getTtsInstallMarkerFiles,
 	languageName,
 	modelSupportsLanguage,
 } from "../extensions/voice/tts-local-models";
@@ -32,10 +33,26 @@ describe("TTS_LOCAL_MODELS catalog shape", () => {
 		}
 	});
 
-	test("sherpaSlot ∈ {kitten, vits, kokoro}", () => {
+	test("sherpaSlot uses a supported local engine", () => {
 		for (const m of TTS_LOCAL_MODELS) {
-			expect(["kitten", "vits", "kokoro"]).toContain(m.sherpaSlot);
+			expect(["kitten", "vits", "kokoro", "pocket"]).toContain(m.sherpaSlot);
 		}
+	});
+
+	test("Pocket TTS pins its archive and bundled reference voice", () => {
+		const model = getTtsModel("pocket-tts-int8-en-2026-01-26");
+
+		expect(model.archiveSha256).toBe("2f3b88823cbbb9bf0b2477ec8ae7b3fec417b3a87b6bb5f256dba66f2ad967cb");
+		expect(model.license).toContain("non-commercial");
+		expect(model.pocket).toEqual({
+			referenceAudioFile: "test_wavs/bria.wav",
+			generationSteps: 5,
+		});
+		expect(getTtsInstallMarkerFiles(model)).toEqual([
+			"lm_flow.int8.onnx",
+			"lm_main.int8.onnx",
+			"test_wavs/bria.wav",
+		]);
 	});
 
 	test("sample rate is sane", () => {
