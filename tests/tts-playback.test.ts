@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { encodeWav, play } from "../extensions/voice/tts-playback";
+import { encodeWav, play, selectStreamingPlayer } from "../extensions/voice/tts-playback";
 
 describe("encodeWav — WAV header correctness", () => {
 	test("standard 24kHz mono short clip", () => {
@@ -91,5 +91,31 @@ describe("play — abort signal handling", () => {
 		});
 		// If we get here the promise resolved.
 		expect(true).toBe(true);
+	});
+});
+
+describe("streaming player selection", () => {
+	test("Linux prefers paplay even when ffplay is installed", () => {
+		const player = selectStreamingPlayer("linux", 24_000, undefined, () => true);
+
+		expect(player?.cmd).toBe("paplay");
+		expect(player?.args).toContain("--rate=24000");
+	});
+
+	test("macOS retains the ffplay streaming path", () => {
+		const player = selectStreamingPlayer("darwin", 24_000, undefined, () => true);
+
+		expect(player?.cmd).toBe("ffplay");
+	});
+
+	test("a named Linux sink never falls through when paplay is unavailable", () => {
+		const player = selectStreamingPlayer(
+			"linux",
+			24_000,
+			"talk_aec_sink",
+			(command) => command !== "paplay",
+		);
+
+		expect(player).toBeNull();
 	});
 });

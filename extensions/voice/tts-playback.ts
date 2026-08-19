@@ -407,10 +407,20 @@ function attachSafetyCatch<T>(p: Promise<T>): Promise<T> {
 interface StreamingPlayerSpec { cmd: string; args: string[]; }
 
 function pickStreamingPlayer(sampleRate: number, pulseSink?: string): StreamingPlayerSpec | null {
+	return selectStreamingPlayer(process.platform, sampleRate, pulseSink, binaryAvailable);
+}
+
+/** Pure platform selection kept separate so Linux cannot regress to the macOS player path. */
+export function selectStreamingPlayer(
+	platform: NodeJS.Platform,
+	sampleRate: number,
+	pulseSink: string | undefined,
+	isAvailable: (command: string) => boolean,
+): StreamingPlayerSpec | null {
 	// A named sink is part of the echo-cancellation contract. Prefer paplay
 	// because its device selection is explicit instead of relying on an audio
 	// backend chosen internally by ffplay.
-	if (pulseSink && process.platform === "linux" && binaryAvailable("paplay")) {
+	if (pulseSink && platform === "linux" && isAvailable("paplay")) {
 		return {
 			cmd: "paplay",
 			args: [
@@ -427,12 +437,24 @@ function pickStreamingPlayer(sampleRate: number, pulseSink?: string): StreamingP
 	// talk setup requires paplay, and this guard keeps routing safe if the
 	// executable disappears after setup.
 	if (pulseSink) return null;
-	// v7.1.3 — ffplay is the most-reliable streaming PCM consumer on
-	// macOS: it's designed for real-time piped audio and doesn't suffer
-	// the sox-with-CoreAudio underrun where sox exits cleanly after
-	// playing only the first ~1.5s of a multi-MB stdin write. Prefer
-	// ffplay when present; fall back to paplay (Linux) or sox.
-	if (binaryAvailable("ffplay")) {
+	// PulseAudio is the native WSL/Linux path. ffplay's input clock can fall
+	// far behind real time while a Pulse microphone capture is active, turning
+	// a short utterance into severe stuttering that lasts for minutes.
+	if (platform === "linux" && isAvailable("paplay")) {
+		return {
+			cmd: "paplay",
+			args: [
+				"--raw",
+				`--rate=${sampleRate}`,
+				"--format=s16le",
+				"--channels=1",
+				"--client-name=pi-listen",
+			],
+		};
+	}
+	// v7.1.3 — ffplay is the most-reliable streaming PCM consumer on macOS:
+	// it avoids the sox/CoreAudio underrun where sox exits after ~1.5 seconds.
+	if (platform === "darwin" && isAvailable("ffplay")) {
 		return {
 			cmd: "ffplay",
 			args: [
@@ -446,22 +468,9 @@ function pickStreamingPlayer(sampleRate: number, pulseSink?: string): StreamingP
 			],
 		};
 	}
-	// paplay (Linux PulseAudio / PipeWire-pulse): pipe PCM via stdin.
-	if (process.platform === "linux" && binaryAvailable("paplay")) {
-		return {
-			cmd: "paplay",
-			args: [
-				"--raw",
-				`--rate=${sampleRate}`,
-				"--format=s16le",
-				"--channels=1",
-				"--client-name=pi-listen",
-			],
-		};
-	}
 	// sox last-resort: cross-platform but has the macOS CoreAudio
 	// underrun issue noted above. Used when ffplay/paplay missing.
-	if (binaryAvailable("sox")) {
+	if (isAvailable("sox")) {
 		return {
 			cmd: "sox",
 			args: [
