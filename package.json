@@ -64,6 +64,7 @@
   },
   "files": [
     "extensions",
+    "scripts/install-tts-model.ts",
     "README.md",
     "LICENSE",
     "package.json"

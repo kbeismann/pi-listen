@@ -209,6 +209,15 @@ The defaults use `parakeet-v3`, `kokoro-en-v0_19`, and low thinking. Set a dedic
 
 For CPU-oriented conversational English, set `ttsModel` to `pocket-tts-int8-en-2026-01-26`. The first use downloads the pinned [sherpa-onnx export](https://k2-fsa.github.io/sherpa/onnx/tts/pocket.html) of [Kyutai Pocket TTS](https://github.com/kyutai-labs/pocket-tts), verifies its SHA-256, and conditions generation on the bundled Bria reference recording. The exported archive includes a non-commercial-use notice in addition to its CC BY 4.0 license; review those terms before using generated speech outside personal or evaluation contexts.
 
+Configuration managers can preinstall the same catalog entry idempotently after updating the package:
+
+```bash
+bun scripts/install-tts-model.ts pocket-tts-int8-en-2026-01-26
+bun scripts/install-tts-model.ts --check pocket-tts-int8-en-2026-01-26
+```
+
+The provisioning command deliberately accepts a model ID rather than a download URL. Archive location, size, integrity hash, extraction, and install markers remain owned by the package catalog, so interactive first use and unattended machine setup cannot drift apart.
+
 ### v7.1 keyboard
 
 While in the settings panel:
