@@ -68,7 +68,7 @@ export function installTalkIntegration(
 	pi: ExtensionAPI,
 	talkMode: TalkModeController,
 	safeToolsByOwner: Map<string, Set<string>>,
-): { publishState(): void } {
+): { publishState(): void; dispose(): void } {
 	const getState = (): TalkStateSnapshot => ({
 		protocol: TALK_SERVICE_PROTOCOL,
 		enabled: talkMode.isEnabled(),
@@ -102,7 +102,7 @@ export function installTalkIntegration(
 		},
 	};
 
-	pi.events.on(TALK_SERVICE_CHANNEL, (data) => {
+	const unsubscribe = pi.events.on(TALK_SERVICE_CHANNEL, (data) => {
 		const request = data as Partial<TalkServiceRequest> | undefined;
 		if (
 			request?.protocol === TALK_SERVICE_PROTOCOL
@@ -116,5 +116,6 @@ export function installTalkIntegration(
 		publishState() {
 			pi.events.emit(TALK_STATE_CHANNEL, getState());
 		},
+		dispose: unsubscribe,
 	};
 }

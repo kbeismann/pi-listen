@@ -273,6 +273,26 @@ describe("continuous talk mode", () => {
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
+	test("returns to listening when headphone capture survives spoken output", async () => {
+		const harness = makeHarness();
+		harness.config.talk.bargeIn.mode = "headphones";
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: {
+				id: "headphone-answer",
+				role: "assistant",
+				content: [{ type: "text", text: "A selected Relay update." }],
+			},
+		});
+		await harness.mode.handleAgentSettled();
+
+		expect(harness.captures).toHaveLength(1);
+		expect(harness.captures[0]!.killedWith).toBeUndefined();
+		expect(harness.mode.getPhase()).toBe("listening");
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
 	test("does not shape or speak a run that began before talk mode", async () => {
 		const { context, mode, spoken } = makeHarness();
 		expect(await mode.beginAgentRun("normal", context as any)).toBeUndefined();

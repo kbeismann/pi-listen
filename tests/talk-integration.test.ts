@@ -98,6 +98,16 @@ describe("talk integration service", () => {
 		expect(safeToolsByOwner.has("pi-relay")).toBe(false);
 		expect(constraintsApplied).toBe(2);
 		expect(await service!.disable()).toBe(true);
+
+		integration.dispose();
+		let rediscovered = false;
+		events.emit(TALK_SERVICE_CHANNEL, {
+			protocol: TALK_SERVICE_PROTOCOL,
+			accept() {
+				rediscovered = true;
+			},
+		});
+		expect(rediscovered).toBe(false);
 	});
 
 	test("rejects malformed integration ownership and tool names", () => {

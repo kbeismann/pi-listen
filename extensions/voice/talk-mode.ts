@@ -990,7 +990,11 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		try { await pendingSpeech; } catch {}
 		if (!runIsCurrent(runId, lifecycleEpoch)) return;
 		state.agentActive = false;
-		startCapture();
+		// Headphone and echo-cancelled modes intentionally keep the existing
+		// capture process alive through speech. Restore the externally visible
+		// listening phase even when startCapture() therefore has no work to do.
+		if (state.capture) setPhase("listening");
+		else startCapture();
 	}
 
 	function handleInput(ctx: TalkContext): void {

@@ -3337,6 +3337,9 @@ export default function (pi: ExtensionAPI) {
 	);
 	publishTalkState = talkIntegration.publishState;
 	talkMode = continuousTalk;
+	pi.on("session_shutdown", async () => {
+		talkIntegration.dispose();
+	});
 	pi.on("session_start", async (_event, eventCtx) => {
 		continuousTalk.restoreInterruptedContext(eventCtx);
 	});
