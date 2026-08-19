@@ -216,9 +216,8 @@ export interface OpenPlaybackStreamOpts {
 /**
  * Open a streaming playback sink. Returns `null` when no streaming-capable
  * player is found on PATH — the caller should fall back to the file-based
- * `play()` path. Player priority: `sox` (preferred — works on macOS via
- * homebrew, Linux via apt/yum, ships with most pi-listen STT installs) →
- * `paplay` (Linux PulseAudio) → null.
+ * `play()` path. Linux prefers native `paplay`; macOS prefers `ffplay`; other
+ * Unix-like systems fall back to `sox`.
  *
  * Windows is intentionally unsupported here — PowerShell SoundPlayer
  * can't accept piped PCM. Windows users get the file-based fallback.
@@ -372,17 +371,17 @@ export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream
 			diagLog(`end() called — awaiting ${totalWrites} writes (${totalBytesAccepted} bytes)`);
 			// Drain all pending writes before signaling EOF.
 			try { await writeTail; } catch { /* swallowed */ }
-			// Sox closes the audio device immediately on EOF, dropping
-			// any audio still in the OS hardware buffer (~1-2s on macOS
-			// CoreAudio). Append a tail of silence so the trailing real
-			// audio is fully flushed before sox tears down the device.
-			// 1.0 sec at sampleRate samples = sampleRate * 2 bytes.
-			const SILENCE_TAIL_SECS = 1;
-			const silence = new Int16Array(sampleRate * SILENCE_TAIL_SECS);
-			try {
-				await writeOne(new Uint8Array(silence.buffer, silence.byteOffset, silence.byteLength));
-			} catch { /* EPIPE ok */ }
-			diagLog(`end() — silence tail written, calling stdin.end()`);
+			// CoreAudio players can drop buffered audio when stdin reaches EOF,
+			// so their player specs retain the historical flush tail. PulseAudio's
+			// paplay drains on EOF; adding the same second of silence there creates
+			// a conspicuous pause after every streamed Talk fragment.
+			if (player.silenceTailSeconds > 0) {
+				const silence = new Int16Array(sampleRate * player.silenceTailSeconds);
+				try {
+					await writeOne(new Uint8Array(silence.buffer, silence.byteOffset, silence.byteLength));
+				} catch { /* EPIPE ok */ }
+			}
+			diagLog(`end() — flush complete, calling stdin.end()`);
 			try { proc.stdin?.end(); } catch { /* already closed */ }
 		},
 		cancel(): void {
@@ -404,7 +403,12 @@ function attachSafetyCatch<T>(p: Promise<T>): Promise<T> {
 	return p;
 }
 
-interface StreamingPlayerSpec { cmd: string; args: string[]; }
+interface StreamingPlayerSpec {
+	cmd: string;
+	args: string[];
+	/** Silence needed to flush players that tear down buffered audio at EOF. */
+	silenceTailSeconds: number;
+}
 
 function pickStreamingPlayer(sampleRate: number, pulseSink?: string): StreamingPlayerSpec | null {
 	return selectStreamingPlayer(process.platform, sampleRate, pulseSink, binaryAvailable);
@@ -423,6 +427,7 @@ export function selectStreamingPlayer(
 	if (pulseSink && platform === "linux" && isAvailable("paplay")) {
 		return {
 			cmd: "paplay",
+			silenceTailSeconds: 0,
 			args: [
 				"--raw",
 				`--rate=${sampleRate}`,
@@ -443,6 +448,7 @@ export function selectStreamingPlayer(
 	if (platform === "linux" && isAvailable("paplay")) {
 		return {
 			cmd: "paplay",
+			silenceTailSeconds: 0,
 			args: [
 				"--raw",
 				`--rate=${sampleRate}`,
@@ -457,6 +463,7 @@ export function selectStreamingPlayer(
 	if (platform === "darwin" && isAvailable("ffplay")) {
 		return {
 			cmd: "ffplay",
+			silenceTailSeconds: 1,
 			args: [
 				"-nodisp",            // no video window
 				"-autoexit",          // exit when input EOFs
@@ -473,6 +480,7 @@ export function selectStreamingPlayer(
 	if (isAvailable("sox")) {
 		return {
 			cmd: "sox",
+			silenceTailSeconds: 1,
 			args: [
 				"-t", "raw",
 				"-r", String(sampleRate),

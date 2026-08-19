@@ -100,12 +100,14 @@ describe("streaming player selection", () => {
 
 		expect(player?.cmd).toBe("paplay");
 		expect(player?.args).toContain("--rate=24000");
+		expect(player?.silenceTailSeconds).toBe(0);
 	});
 
 	test("macOS retains the ffplay streaming path", () => {
 		const player = selectStreamingPlayer("darwin", 24_000, undefined, () => true);
 
 		expect(player?.cmd).toBe("ffplay");
+		expect(player?.silenceTailSeconds).toBe(1);
 	});
 
 	test("a named Linux sink never falls through when paplay is unavailable", () => {
