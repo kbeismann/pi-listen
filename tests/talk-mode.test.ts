@@ -333,7 +333,7 @@ describe("continuous talk mode", () => {
 		expect(harness.mode.getPhase()).toBe("off");
 	});
 
-	test("headphone barge-in aborts speech and the active model run", async () => {
+	test("headphone barge-in requires the configured continuous-speech interval", async () => {
 		let speechAborted = false;
 		const harness = makeHarness({
 			speak: async (_text, _config, _ctx, signal, _audioRoute, onPlaybackStart) => new Promise<void>((_resolve, reject) => {
@@ -349,6 +349,7 @@ describe("continuous talk mode", () => {
 			}),
 		});
 		harness.config.talk.bargeIn.mode = "headphones";
+		harness.config.talk.bargeIn.minSpeechMs = 1_000;
 
 		await harness.mode.enable(harness.context as any);
 		await harness.mode.beginAgentRun("base", harness.context as any);
@@ -359,8 +360,19 @@ describe("continuous talk mode", () => {
 		await Bun.sleep(5);
 
 		expect(harness.captures[0]!.killedWith).toBeUndefined();
+		feedInOddChunks(harness.captures[0]!, Buffer.concat([
+			...Array.from({ length: 28 }, () => toneFrame()),
+			...Array.from({ length: 12 }, () => Buffer.alloc(1_024)),
+		]));
+		await Bun.sleep(10);
+		expect(speechAborted).toBe(false);
+		expect(harness.context.abortCount).toBe(0);
+		expect(harness.pi.sentMessages).toEqual([]);
+		expect(harness.captures[0]!.killedWith).toBeUndefined();
+		expect(harness.mode.getPhase()).toBe("speaking");
+
 		feedInOddChunks(harness.captures[0]!, Buffer.concat(
-			Array.from({ length: 16 }, () => toneFrame()),
+			Array.from({ length: 34 }, () => toneFrame()),
 		));
 		await Bun.sleep(10);
 

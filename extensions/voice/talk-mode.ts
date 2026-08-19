@@ -51,6 +51,7 @@ interface UtteranceInterruption {
 	verifyBeforeInterrupting: boolean;
 	interruptedImmediately: boolean;
 	confirmed: boolean;
+	beganDuringPlayback: boolean;
 }
 
 const STATUS_KEY = "continuous-talk";
@@ -250,6 +251,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.speechAbort?.abort();
 	}
 
+	function restorePhaseAfterIgnoredAudio(): void {
+		setPhase(state.playbackActive ? "speaking" : state.agentActive ? "thinking" : "listening");
+	}
+
 	function recordInterruptedContext(): void {
 		const runId = state.currentRun?.id;
 		if (runId === undefined) return;
@@ -381,6 +386,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 						verifyBeforeInterrupting: bargeInEnabled() && state.agentActive && !duringPlayback,
 						interruptedImmediately: false,
 						confirmed: false,
+						beganDuringPlayback: duringPlayback,
 					};
 					setPhase("hearing");
 				}
@@ -396,10 +402,18 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 				}
 				if (event.type === "discarded") {
 					state.utteranceInterruption = undefined;
-					setPhase("listening");
+					restorePhaseAfterIgnoredAudio();
 				}
 				if (event.type === "speech_end") {
 					const utteranceInterruption = state.utteranceInterruption;
+					if (utteranceInterruption?.beganDuringPlayback && !utteranceInterruption.confirmed) {
+						// Playback-time audio is an interruption gesture, not a second
+						// user-input channel. Ignore speech that ends before the configured
+						// continuous-speech threshold instead of steering with a backchannel.
+						state.utteranceInterruption = undefined;
+						restorePhaseAfterIgnoredAudio();
+						continue;
+					}
 					stopCapture();
 					const transcription = transcribeAndSubmit(event.pcm, epoch, {
 						verifyBeforeInterrupting: utteranceInterruption?.verifyBeforeInterrupting === true
