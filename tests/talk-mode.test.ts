@@ -174,6 +174,12 @@ describe("continuous talk mode", () => {
 		expect(TALK_SYSTEM_PROMPT).toContain("explicitly asks for a longer, detailed, or step-by-step answer");
 	});
 
+	test("distinguishes read-only inspection from blocked shell access", () => {
+		expect(TALK_SYSTEM_PROMPT).toContain("read and search local files and configuration");
+		expect(TALK_SYSTEM_PROMPT).toContain("additional bounded read-only inspectors");
+		expect(TALK_SYSTEM_PROMPT).toContain("Arbitrary shell commands remain unavailable");
+	});
+
 	test("renders talk mode as a full-width neon-magenta footer", async () => {
 		const { context, mode } = makeHarness();
 
