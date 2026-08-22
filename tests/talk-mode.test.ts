@@ -329,6 +329,43 @@ describe("continuous talk mode", () => {
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
+	test("speaks custom continuations that skip before_agent_start", async () => {
+		const harness = makeHarness();
+		await harness.mode.enable(harness.context as any);
+
+		harness.mode.handleTurnStart(harness.context as any);
+		const firstRunId = harness.mode._state.currentRun?.id;
+		harness.mode.handleMessageEnd({
+			message: {
+				id: "first-continuation",
+				role: "assistant",
+				content: [{ type: "text", text: "The first autonomous update is spoken." }],
+			},
+		});
+		await harness.mode.handleAgentSettled();
+
+		expect(harness.spoken).toEqual(["The first autonomous update is spoken."]);
+		expect(harness.mode._state.currentRun?.acceptingEvents).toBe(false);
+		expect(harness.mode.suppressesGeneralSpeech()).toBe(true);
+
+		harness.mode.handleTurnStart(harness.context as any);
+		expect(harness.mode._state.currentRun?.id).toBeGreaterThan(firstRunId ?? 0);
+		harness.mode.handleMessageEnd({
+			message: {
+				id: "second-continuation",
+				role: "assistant",
+				content: [{ type: "text", text: "The next autonomous update is also spoken." }],
+			},
+		});
+		await harness.mode.handleAgentSettled();
+
+		expect(harness.spoken).toEqual([
+			"The first autonomous update is spoken.",
+			"The next autonomous update is also spoken.",
+		]);
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
 	test("does not shape or speak a run that began before talk mode", async () => {
 		const { context, mode, spoken } = makeHarness();
 		expect(await mode.beginAgentRun("normal", context as any)).toBeUndefined();

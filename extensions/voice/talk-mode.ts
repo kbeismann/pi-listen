@@ -878,11 +878,19 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (!state.enabled) return;
 		state.ctx = ctx;
 		state.agentActive = true;
-		if (state.pendingBargeTurn) {
+		// Pi can start a custom triggerTurn continuation without first emitting
+		// before_agent_start. Claim only an otherwise unowned turn here so tool
+		// continuations remain part of the current speech run.
+		if (
+			state.pendingBargeTurn
+			|| !state.currentRun?.talkScoped
+			|| !state.currentRun.acceptingEvents
+		) {
 			state.runCounter += 1;
 			state.currentRun = { id: state.runCounter, talkScoped: true, acceptingEvents: true };
 			state.pendingBargeTurn = false;
 			state.interruptionInProgress = false;
+			state.generalSpeechSuppressed = true;
 			state.messageStreams.clear();
 			cancelSpeechQueue();
 		}
