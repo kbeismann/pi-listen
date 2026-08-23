@@ -93,6 +93,10 @@ import {
 } from "./voice/local";
 import { createTalkMode } from "./voice/talk-mode";
 import { installTalkIntegration } from "./voice/talk-integration";
+import {
+	acquireDictationPreemption,
+	type DictationPreemptionLease,
+} from "./voice/dictation-preemption";
 import { createTalkSpeechOutput } from "./voice/talk-speech-output";
 import { createPipeWireEchoCancellation } from "./voice/pipewire-aec";
 import { createSherpaSpeechDetector, prepareSherpaVad } from "./voice/sherpa-vad";
@@ -685,6 +689,9 @@ export default function (pi: ExtensionAPI) {
 	// Streaming session state
 	let activeSession: VoiceSession | null = null;
 	let preRecordingSession: StreamingSession | null = null;  // Started during warmup, promoted on confirm (Deepgram only)
+	let dictationPreemptionLease: DictationPreemptionLease | null = null;
+	let dictationPreemptionPending: Promise<DictationPreemptionLease> | null = null;
+	let dictationPreemptionGeneration = 0;
 
 	let lastStopTime = 0;    // For Escape-to-clear-editor within 30s of recording
 	let lastEscapeTime = 0;  // For double-escape to clear editor
@@ -786,9 +793,62 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function releaseDictationPreemption(): void {
+		dictationPreemptionGeneration += 1;
+		dictationPreemptionPending = null;
+		const lease = dictationPreemptionLease;
+		dictationPreemptionLease = null;
+		try { lease?.release(); } catch {}
+	}
+
+	async function ensureDictationPreemption(): Promise<boolean> {
+		if (dictationPreemptionLease) return true;
+		if (!dictationPreemptionPending) {
+			const generation = dictationPreemptionGeneration;
+			const pending = acquireDictationPreemption(pi);
+			dictationPreemptionPending = pending;
+			void pending.then((lease) => {
+				if (
+					dictationPreemptionPending !== pending
+					|| dictationPreemptionGeneration !== generation
+				) {
+					lease.release();
+					return;
+				}
+				dictationPreemptionPending = null;
+				dictationPreemptionLease = lease;
+			}, () => {
+				if (dictationPreemptionPending === pending) {
+					dictationPreemptionPending = null;
+				}
+			});
+		}
+		const pending = dictationPreemptionPending;
+		if (!pending) return dictationPreemptionLease !== null;
+		await pending;
+		return dictationPreemptionLease !== null;
+	}
+
+	function prepareWarmupDictationPreemption(): void {
+		void ensureDictationPreemption().then((acquired) => {
+			if (acquired && voiceState === "warmup") startPreRecording();
+		}).catch((error) => {
+			if (voiceState !== "warmup") return;
+			clearWarmupWidget();
+			hideWidget();
+			resetHoldState();
+			setVoiceState("idle");
+			ctx?.ui.notify(
+				`Could not take microphone priority: ${error instanceof Error ? error.message : String(error)}`,
+				"error",
+			);
+		});
+	}
+
 	function setVoiceState(newState: VoiceState) {
 		const prev = voiceState;
 		voiceState = newState;
+		if (newState === "idle") releaseDictationPreemption();
 		if (prev !== newState) {
 			voiceDebug(`STATE: ${prev} → ${newState}`);
 		}
@@ -1151,9 +1211,9 @@ export default function (pi: ExtensionAPI) {
 		if (_startingRecording) return false; // Prevent overlapping starts during corruption guard sleep
 		_startingRecording = true;
 
+		try {
 		abortActiveSpeak();
 
-		try {
 		// ── SESSION CORRUPTION GUARD ──
 		// If we're still finalizing from a previous recording, abort it first.
 		// This prevents the "slow connection overlaps new recording" bug.
@@ -1166,6 +1226,24 @@ export default function (pi: ExtensionAPI) {
 			setVoiceState("idle");
 			// Brief pause to let resources release
 			await new Promise((r) => setTimeout(r, CORRUPTION_GUARD_MS));
+		}
+
+		let microphonePriorityAcquired: boolean;
+		try {
+			microphonePriorityAcquired = await ensureDictationPreemption();
+		} catch (error) {
+			ctx.ui.notify(
+				`Could not take microphone priority: ${error instanceof Error ? error.message : String(error)}`,
+				"error",
+			);
+			setVoiceState("idle");
+			return false;
+		}
+		if (!microphonePriorityAcquired) return false;
+		if (talkMode?.isEnabled()) {
+			ctx.ui.notify("Hands-free talk mode owns the microphone. Use /talk off before starting dictation.", "warning");
+			setVoiceState("idle");
+			return false;
 		}
 
 		// ── STALE TRANSCRIPT CLEANUP ──
@@ -1486,9 +1564,12 @@ export default function (pi: ExtensionAPI) {
 				// Local: show which model is transcribing + estimated time
 				const modelName = LOCAL_MODELS.find(m => m.id === (config.localModel || "whisper-small"))?.name || config.localModel || "local model";
 				ctx?.ui.notify(`Transcribing with ${modelName}…`, "info");
-				await stopLocalSession(activeSession, config);
+				const finalization = stopLocalSession(activeSession, config);
+				releaseDictationPreemption();
+				await finalization;
 			} else {
 				stopStreamingSession(activeSession);
+				releaseDictationPreemption();
 			}
 		} else {
 			// No active session — shouldn't happen, but recover gracefully
@@ -1637,6 +1718,11 @@ export default function (pi: ExtensionAPI) {
 
 			// ── SPACE handling ──
 			if (matchesKey(data, "space")) {
+				// Talk owns every microphone interaction in its own Pi session.
+				// Leave SPACE to the editor without warmup, pre-recording, widgets,
+				// or a late ownership warning from startVoiceRecording().
+				if (talkMode?.isEnabled()) return undefined;
+
 				// ── ERROR COOLDOWN: block all voice activation for 5s after an error ──
 				if (errorCooldownUntil > Date.now()) {
 					// During cooldown, let space through as a normal character
@@ -1740,7 +1826,7 @@ export default function (pi: ExtensionAPI) {
 							holdConfirmed = true;
 							setVoiceState("warmup");
 							showWarmupWidget();
-							startPreRecording();
+							prepareWarmupDictationPreemption();
 
 							const alreadyElapsed = now - (spaceDownTime || now);
 							const remaining = Math.max(0, getHoldThresholdMs() - alreadyElapsed);
@@ -1857,7 +1943,7 @@ export default function (pi: ExtensionAPI) {
 
 						setVoiceState("warmup");
 						showWarmupWidget();
-						startPreRecording();
+						prepareWarmupDictationPreemption();
 
 						holdActivationTimer = setTimeout(() => {
 							holdActivationTimer = null;
@@ -1908,7 +1994,7 @@ export default function (pi: ExtensionAPI) {
 							holdConfirmed = true;
 							setVoiceState("warmup");
 							showWarmupWidget();
-							startPreRecording();
+							prepareWarmupDictationPreemption();
 
 							const alreadyElapsed = now - spaceDownTime;
 							const remaining = Math.max(0, getHoldThresholdMs() - alreadyElapsed);
