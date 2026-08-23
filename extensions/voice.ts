@@ -3331,8 +3331,18 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("talk", {
-		description: "Hands-free local conversation: /talk [on|off|status]",
-		getArgumentCompletions: (prefix: string) => ["on", "off", "status"]
+		description: "Hands-free local conversation: /talk [on|off|status|input ...|output ...]",
+		getArgumentCompletions: (prefix: string) => [
+			"on",
+			"off",
+			"status",
+			"input on",
+			"input off",
+			"input toggle",
+			"output on",
+			"output off",
+			"output toggle",
+		]
 			.filter((item) => item.startsWith(prefix))
 			.map((item) => ({ value: item, label: item })),
 			handler: async (args, cmdCtx) => {
@@ -3367,7 +3377,25 @@ export default function (pi: ExtensionAPI) {
 				cmdCtx.ui.notify(continuousTalk.statusLines().join("\n"), "info");
 				return;
 			}
-			cmdCtx.ui.notify("Usage: /talk [on|off|status]", "warning");
+			const controlMatch = /^(input|output) (on|off|toggle)$/.exec(subcommand);
+			if (controlMatch) {
+				if (!continuousTalk.isEnabled()) {
+					cmdCtx.ui.notify("Talk mode is off. Use /talk on first.", "warning");
+					return;
+				}
+				const [, control, action] = controlMatch;
+				const currentlyEnabled = control === "input"
+					? continuousTalk.isInputEnabled()
+					: continuousTalk.isOutputEnabled();
+				const enabled = action === "toggle" ? !currentlyEnabled : action === "on";
+				if (control === "input") continuousTalk.setInputEnabled(enabled, cmdCtx);
+				else continuousTalk.setOutputEnabled(enabled, cmdCtx);
+				return;
+			}
+			cmdCtx.ui.notify(
+				"Usage: /talk [on|off|status|input on|off|toggle|output on|off|toggle]",
+				"warning",
+			);
 		},
 	});
 

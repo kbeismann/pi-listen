@@ -186,7 +186,7 @@ describe("continuous talk mode", () => {
 		expect(await mode.enable(context as any)).toBe(true);
 		const activeStatus = context.statuses.get("continuous-talk");
 		expect(activeStatus).toStartWith("\x1b[0;1;38;2;0;0;0;48;2;255;0;255m");
-		expect(activeStatus).toContain("TALK MODE ON | LISTENING");
+		expect(activeStatus).toContain("TALK MODE ON | LISTENING | INPUT ON | OUTPUT ON");
 		expect(activeStatus).toEndWith("\x1b[0m");
 
 		const footerFactory = context.footerUpdates.find((update) => typeof update === "function");
@@ -196,17 +196,73 @@ describe("continuous talk mode", () => {
 		expect(footerLine).toStartWith("\x1b[0;1;38;2;0;0;0;48;2;255;0;255m");
 		expect(footerLine).toEndWith("\x1b[0m");
 		expect(plainFooterLine).toHaveLength(72);
-		expect(plainFooterLine.trim()).toBe("TALK MODE ON | LISTENING");
+		expect(plainFooterLine.trim()).toBe("TALK MODE ON | LISTENING | INPUT ON | OUTPUT ON");
 		expect(context.footerUpdates).toHaveLength(1);
 
 		mode.handleInput(context as any);
 		const thinkingLine = footer.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "");
-		expect(thinkingLine.trim()).toBe("TALK MODE ON | THINKING");
+		expect(thinkingLine.trim()).toBe("TALK MODE ON | THINKING | INPUT ON | OUTPUT ON");
 		expect(context.footerUpdates).toHaveLength(1);
 
 		await mode.disable(context as any, { notify: false });
 		expect(context.statuses.get("continuous-talk")).toBeUndefined();
 		expect(context.footerUpdates.at(-1)).toBeUndefined();
+	});
+
+	test("controls continuous input and spoken output independently", async () => {
+		const harness = makeHarness();
+
+		expect(await harness.mode.enable(harness.context as any, {
+			inputEnabled: false,
+			outputEnabled: false,
+			notify: false,
+		})).toBe(true);
+		expect(harness.mode.getPhase()).toBe("standby");
+		expect(harness.mode.isInputEnabled()).toBe(false);
+		expect(harness.mode.isOutputEnabled()).toBe(false);
+		expect(harness.captures).toEqual([]);
+
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: {
+				id: "silent-answer",
+				role: "assistant",
+				content: [{ type: "text", text: "This response stays silent." }],
+			},
+		});
+		await harness.mode.handleAgentSettled();
+		expect(harness.spoken).toEqual([]);
+		expect(harness.mode.getPhase()).toBe("standby");
+
+		expect(harness.mode.setOutputEnabled(true, harness.context as any, {
+			notify: false,
+		})).toBe(true);
+		harness.mode.handleTurnStart(harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: {
+				id: "spoken-answer",
+				role: "assistant",
+				content: [{ type: "text", text: "This response is spoken." }],
+			},
+		});
+		await harness.mode.handleAgentSettled();
+		expect(harness.spoken).toEqual(["This response is spoken."]);
+		expect(harness.captures).toEqual([]);
+
+		expect(harness.mode.setInputEnabled(true, harness.context as any, {
+			notify: false,
+		})).toBe(true);
+		expect(harness.mode.getPhase()).toBe("listening");
+		expect(harness.captures).toHaveLength(1);
+		expect(harness.mode.setInputEnabled(false, harness.context as any, {
+			notify: false,
+		})).toBe(true);
+		expect(harness.captures[0]!.killedWith).toBe("SIGKILL");
+		expect(harness.mode.getPhase()).toBe("standby");
+		expect(harness.mode.statusLines()).toContain("input: off");
+		expect(harness.mode.statusLines()).toContain("output: on");
+
+		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
 	test("runs a local hands-free turn and restores the exact Pi state", async () => {
@@ -463,6 +519,46 @@ describe("continuous talk mode", () => {
 		expect(speechAborted).toBe(true);
 		expect(harness.captures).toHaveLength(1);
 		expect(harness.mode.getPhase()).toBe("off");
+	});
+
+	test("output off stops playback without disabling talk mode", async () => {
+		let speechAborted = false;
+		const harness = makeHarness({
+			speak: async (_text, _config, _ctx, signal) => new Promise<void>((_resolve, reject) => {
+				const abort = () => {
+					speechAborted = true;
+					const error = new Error("aborted");
+					error.name = "AbortError";
+					reject(error);
+				};
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			}),
+		});
+		await harness.mode.enable(harness.context as any, {
+			inputEnabled: false,
+			outputEnabled: true,
+			notify: false,
+		});
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: {
+				id: "answer",
+				role: "assistant",
+				content: [{ type: "text", text: "Stop this spoken response." }],
+			},
+		});
+		await Bun.sleep(5);
+
+		expect(harness.mode.setOutputEnabled(false, harness.context as any, {
+			notify: false,
+		})).toBe(true);
+		await harness.mode.handleAgentSettled();
+		expect(speechAborted).toBe(true);
+		expect(harness.mode.isEnabled()).toBe(true);
+		expect(harness.mode.getPhase()).toBe("standby");
+
+		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
 	test("talk off waits for active model work instead of aborting it", async () => {

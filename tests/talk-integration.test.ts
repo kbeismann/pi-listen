@@ -36,23 +36,40 @@ describe("talk integration service", () => {
 		const events = new FakeEventBus();
 		const safeToolsByOwner = new Map<string, Set<string>>();
 		let enabled = false;
+		let inputEnabled = false;
+		let outputEnabled = false;
 		let phase: TalkPhase = "off";
 		let constraintsApplied = 0;
 		const mode = {
-			async enable(): Promise<boolean> {
+			async enable(_ctx: unknown, options: { inputEnabled?: boolean; outputEnabled?: boolean } = {}): Promise<boolean> {
 				enabled = true;
-				phase = "listening";
+				inputEnabled = options.inputEnabled ?? true;
+				outputEnabled = options.outputEnabled ?? true;
+				phase = inputEnabled ? "listening" : "standby";
 				return true;
 			},
 			async disable(): Promise<boolean> {
 				enabled = false;
+				inputEnabled = false;
+				outputEnabled = false;
 				phase = "off";
+				return true;
+			},
+			setInputEnabled(value: boolean): boolean {
+				inputEnabled = value;
+				phase = value ? "listening" : "standby";
+				return true;
+			},
+			setOutputEnabled(value: boolean): boolean {
+				outputEnabled = value;
 				return true;
 			},
 			applyConstraints(): void {
 				constraintsApplied += 1;
 			},
 			isEnabled: () => enabled,
+			isInputEnabled: () => inputEnabled,
+			isOutputEnabled: () => outputEnabled,
 			getPhase: () => phase,
 		};
 		const integration = installTalkIntegration(
@@ -72,6 +89,8 @@ describe("talk integration service", () => {
 		expect(service!.getState()).toEqual({
 			protocol: TALK_SERVICE_PROTOCOL,
 			enabled: false,
+			inputEnabled: false,
+			outputEnabled: false,
 			phase: "off",
 		});
 
@@ -79,7 +98,12 @@ describe("talk integration service", () => {
 		expect([...safeToolsByOwner.get("pi-relay")!]).toEqual(["pi_supervisor"]);
 		expect(constraintsApplied).toBe(0);
 
-		expect(await service!.enable({} as any)).toBe(true);
+		expect(await service!.enable({} as any, {
+			inputEnabled: false,
+			outputEnabled: false,
+		})).toBe(true);
+		expect(service!.setInputEnabled(true)).toBe(true);
+		expect(service!.setOutputEnabled(true)).toBe(true);
 		service!.setSafeTools("pi-relay", ["pi_supervisor"]);
 		expect(constraintsApplied).toBe(1);
 
@@ -91,6 +115,8 @@ describe("talk integration service", () => {
 		expect(published).toEqual({
 			protocol: TALK_SERVICE_PROTOCOL,
 			enabled: true,
+			inputEnabled: true,
+			outputEnabled: true,
 			phase: "listening",
 		});
 
@@ -118,8 +144,12 @@ describe("talk integration service", () => {
 			{
 				enable: async () => true,
 				disable: async () => true,
+				setInputEnabled: () => true,
+				setOutputEnabled: () => true,
 				applyConstraints() {},
 				isEnabled: () => false,
+				isInputEnabled: () => false,
+				isOutputEnabled: () => false,
 				getPhase: () => "off",
 			},
 			integrationTools,

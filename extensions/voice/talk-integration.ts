@@ -3,28 +3,47 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
-import type { TalkPhase } from "./talk-mode";
+import type {
+	TalkControlOptions,
+	TalkEnableOptions,
+	TalkPhase,
+} from "./talk-mode";
 
-export const TALK_SERVICE_CHANNEL = "pi-listen:talk-service:v1";
-export const TALK_STATE_CHANNEL = "pi-listen:talk-state:v1";
-export const TALK_SERVICE_PROTOCOL = "pi-listen.talk-service/v1";
+export const TALK_SERVICE_CHANNEL = "pi-listen:talk-service:v2";
+export const TALK_STATE_CHANNEL = "pi-listen:talk-state:v2";
+export const TALK_SERVICE_PROTOCOL = "pi-listen.talk-service/v2";
 
 export type TalkIntegrationContext = ExtensionContext | ExtensionCommandContext;
 
 export interface TalkStateSnapshot {
 	protocol: typeof TALK_SERVICE_PROTOCOL;
 	enabled: boolean;
+	inputEnabled: boolean;
+	outputEnabled: boolean;
 	phase: TalkPhase;
 }
 
 export interface TalkIntegrationService {
 	protocol: typeof TALK_SERVICE_PROTOCOL;
 	getState(): TalkStateSnapshot;
-	enable(ctx: TalkIntegrationContext): Promise<boolean>;
+	enable(
+		ctx: TalkIntegrationContext,
+		options?: TalkEnableOptions,
+	): Promise<boolean>;
 	disable(
 		ctx?: TalkIntegrationContext,
 		options?: { notify?: boolean; awaitTranscription?: boolean },
 	): Promise<boolean>;
+	setInputEnabled(
+		enabled: boolean,
+		ctx?: TalkIntegrationContext,
+		options?: TalkControlOptions,
+	): boolean;
+	setOutputEnabled(
+		enabled: boolean,
+		ctx?: TalkIntegrationContext,
+		options?: TalkControlOptions,
+	): boolean;
 	setSafeTools(
 		owner: string,
 		toolNames: string[],
@@ -39,13 +58,28 @@ export interface TalkServiceRequest {
 }
 
 interface TalkModeController {
-	enable(ctx: TalkIntegrationContext): Promise<boolean>;
+	enable(
+		ctx: TalkIntegrationContext,
+		options?: TalkEnableOptions,
+	): Promise<boolean>;
 	disable(
 		ctx?: TalkIntegrationContext,
 		options?: { notify?: boolean; awaitTranscription?: boolean },
 	): Promise<boolean>;
+	setInputEnabled(
+		enabled: boolean,
+		ctx?: TalkIntegrationContext,
+		options?: TalkControlOptions,
+	): boolean;
+	setOutputEnabled(
+		enabled: boolean,
+		ctx?: TalkIntegrationContext,
+		options?: TalkControlOptions,
+	): boolean;
 	applyConstraints(ctx?: TalkIntegrationContext): void;
 	isEnabled(): boolean;
+	isInputEnabled(): boolean;
+	isOutputEnabled(): boolean;
 	getPhase(): TalkPhase;
 }
 
@@ -72,14 +106,20 @@ export function installTalkIntegration(
 	const getState = (): TalkStateSnapshot => ({
 		protocol: TALK_SERVICE_PROTOCOL,
 		enabled: talkMode.isEnabled(),
+		inputEnabled: talkMode.isInputEnabled(),
+		outputEnabled: talkMode.isOutputEnabled(),
 		phase: talkMode.getPhase(),
 	});
 
 	const service: TalkIntegrationService = {
 		protocol: TALK_SERVICE_PROTOCOL,
 		getState,
-		enable: (ctx) => talkMode.enable(ctx),
+		enable: (ctx, options) => talkMode.enable(ctx, options),
 		disable: (ctx, options) => talkMode.disable(ctx, options),
+		setInputEnabled: (enabled, ctx, options) =>
+			talkMode.setInputEnabled(enabled, ctx, options),
+		setOutputEnabled: (enabled, ctx, options) =>
+			talkMode.setOutputEnabled(enabled, ctx, options),
 		setSafeTools(owner, toolNames, ctx) {
 			if (!validOwner(owner)) throw new Error("Invalid talk integration owner.");
 			if (

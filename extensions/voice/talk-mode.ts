@@ -11,7 +11,17 @@ import type { SpeechDetector } from "./sherpa-vad";
 import { prepareForSpeech } from "./tts-text-filter";
 
 export type TalkContext = ExtensionContext | ExtensionCommandContext;
-export type TalkPhase = "off" | "starting" | "listening" | "hearing" | "transcribing" | "thinking" | "speaking" | "stopping" | "error";
+export type TalkPhase = "off" | "starting" | "standby" | "listening" | "hearing" | "transcribing" | "thinking" | "speaking" | "stopping" | "error";
+
+export interface TalkEnableOptions {
+	inputEnabled?: boolean;
+	outputEnabled?: boolean;
+	notify?: boolean;
+}
+
+export interface TalkControlOptions {
+	notify?: boolean;
+}
 
 export interface TalkCapture {
 	process: ChildProcess;
@@ -159,10 +169,15 @@ function isSubstantiveInterruption(text: string): boolean {
 	return !normalized.split(/\s+/).every((word) => NON_INTERRUPTING_TALK_WORDS.has(word));
 }
 
-function talkStateLabel(phase: Exclude<TalkPhase, "off">): string {
-	return phase === "starting" || phase === "stopping" || phase === "error"
+function talkStateLabel(
+	phase: Exclude<TalkPhase, "off">,
+	inputEnabled: boolean,
+	outputEnabled: boolean,
+): string {
+	const phaseLabel = phase === "starting" || phase === "stopping" || phase === "error"
 		? phase.toUpperCase()
 		: `ON | ${phase.toUpperCase()}`;
+	return `${phaseLabel} | INPUT ${inputEnabled ? "ON" : "OFF"} | OUTPUT ${outputEnabled ? "ON" : "OFF"}`;
 }
 
 /**
@@ -171,14 +186,23 @@ function talkStateLabel(phase: Exclude<TalkPhase, "off">): string {
  * deliberately independent of the active theme so talk mode's microphone
  * ownership and read-only tool constraints are unmistakable at a glance.
  */
-function formatTalkStatus(phase: Exclude<TalkPhase, "off">): string {
-	return `${TALK_MODE_HIGHLIGHT} TALK MODE ${talkStateLabel(phase)} ${ANSI_RESET}`;
+function formatTalkStatus(
+	phase: Exclude<TalkPhase, "off">,
+	inputEnabled: boolean,
+	outputEnabled: boolean,
+): string {
+	return `${TALK_MODE_HIGHLIGHT} TALK MODE ${talkStateLabel(phase, inputEnabled, outputEnabled)} ${ANSI_RESET}`;
 }
 
-function formatTalkFooterLine(phase: Exclude<TalkPhase, "off">, width: number): string {
+function formatTalkFooterLine(
+	phase: Exclude<TalkPhase, "off">,
+	inputEnabled: boolean,
+	outputEnabled: boolean,
+	width: number,
+): string {
 	const targetWidth = Math.max(0, Math.floor(width));
 	if (targetWidth === 0) return "";
-	const label = ` TALK MODE ${talkStateLabel(phase)} `;
+	const label = ` TALK MODE ${talkStateLabel(phase, inputEnabled, outputEnabled)} `;
 	const visibleLabel = label.slice(0, targetWidth);
 	const availablePadding = targetWidth - visibleLabel.length;
 	const leftPadding = Math.floor(availablePadding / 2);
@@ -198,6 +222,8 @@ function formatTalkFooterLine(phase: Exclude<TalkPhase, "off">, width: number): 
 export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependencies) {
 	const state = {
 		enabled: false,
+		inputEnabled: false,
+		outputEnabled: false,
 		phase: "off" as TalkPhase,
 		talkFooterActive: false,
 		lifecycleEpoch: 0,
@@ -256,12 +282,24 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 				invalidate() {},
 				render(width: number): string[] {
 					const visiblePhase = state.phase === "off" ? "stopping" : state.phase;
-					return [formatTalkFooterLine(visiblePhase, width)];
+					return [formatTalkFooterLine(
+						visiblePhase,
+						state.inputEnabled,
+						state.outputEnabled,
+						width,
+					)];
 				},
 			}));
 			state.talkFooterActive = true;
 		}
-		target.ui.setStatus(STATUS_KEY, formatTalkStatus(phase));
+		target.ui.setStatus(
+			STATUS_KEY,
+			formatTalkStatus(phase, state.inputEnabled, state.outputEnabled),
+		);
+	}
+
+	function readyPhase(): "listening" | "standby" {
+		return state.inputEnabled ? "listening" : "standby";
 	}
 
 	function talkConfig(): ContinuousTalkConfig {
@@ -269,6 +307,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	}
 
 	function bargeInEnabled(): boolean {
+		if (!state.inputEnabled) return false;
 		const mode = talkConfig().bargeIn.mode;
 		if (mode === "headphones") return true;
 		return mode === "pipewire-aec" && state.audioRoute?.echoCancelled === true;
@@ -329,7 +368,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	}
 
 	function restorePhaseAfterIgnoredAudio(): void {
-		setPhase(state.playbackActive ? "speaking" : state.agentActive ? "thinking" : "listening");
+		setPhase(state.playbackActive ? "speaking" : state.agentActive ? "thinking" : readyPhase());
 	}
 
 	function recordInterruptedContext(): void {
@@ -477,6 +516,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	function consumeCaptureChunk(capture: TalkCapture, chunk: Buffer, epoch: number): void {
 		if (
 			!state.enabled
+			|| !state.inputEnabled
 			|| state.capture !== capture
 			|| state.lifecycleEpoch !== epoch
 			|| !state.vad
@@ -561,8 +601,14 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.pcmRemainder = Buffer.from(combined.subarray(offset));
 	}
 
-	function startCapture(ctx?: TalkContext, options: { stopModeOnFailure?: boolean } = { stopModeOnFailure: true }): boolean {
-		if (!state.enabled || state.capture || !state.speechDetector) return false;
+	function startCapture(
+		ctx?: TalkContext,
+		options: { stopModeOnFailure?: boolean; updatePhase?: boolean } = {
+			stopModeOnFailure: true,
+			updatePhase: true,
+		},
+	): boolean {
+		if (!state.enabled || !state.inputEnabled || state.capture || !state.speechDetector) return false;
 		const epoch = state.lifecycleEpoch;
 		let capture: TalkCapture | null;
 		try {
@@ -616,7 +662,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		capture.process.stdout.on("data", state.captureDataHandler);
 		capture.process.on("error", state.captureErrorHandler);
 		capture.process.on("exit", state.captureExitHandler);
-		setPhase("listening", ctx);
+		if (options.updatePhase !== false) setPhase("listening", ctx);
 		return true;
 	}
 
@@ -633,8 +679,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			if (!text || (options.verifyBeforeInterrupting && !isSubstantiveInterruption(text))) {
 				state.interruptionInProgress = false;
 				state.pendingBargeTurn = false;
-				setPhase("listening");
-				startCapture();
+				setPhase(readyPhase());
+				if (state.inputEnabled) startCapture();
 				return;
 			}
 			// The audio ended before transcription began, so it cannot be echo
@@ -649,7 +695,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			state.interruptionInProgress = false;
 			state.pendingBargeTurn = false;
 			notify(state.ctx, `Talk transcription failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-			startCapture();
+			setPhase(readyPhase());
+			if (state.inputEnabled) startCapture();
 		}
 	}
 
@@ -713,7 +760,95 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		return modelRestored;
 	}
 
-	async function enable(ctx: TalkContext): Promise<boolean> {
+	function setInputEnabled(
+		enabled: boolean,
+		ctx: TalkContext | undefined = state.ctx,
+		options: TalkControlOptions = {},
+	): boolean {
+		if (!state.enabled) {
+			if (options.notify !== false) notify(ctx, "Talk mode is off. Use /talk on first.", "warning");
+			return false;
+		}
+		if (state.inputEnabled === enabled) {
+			if (options.notify !== false) notify(ctx, `Talk input is already ${enabled ? "on" : "off"}.`);
+			return false;
+		}
+
+		state.inputEnabled = enabled;
+		if (!enabled) {
+			stopCapture();
+			if (state.phase === "listening" || state.phase === "hearing") {
+				setPhase(state.agentActive ? "thinking" : "standby", ctx);
+			} else {
+				setPhase(state.phase, ctx);
+			}
+		} else {
+			const captureMayStart = !state.playbackActive || bargeInEnabled();
+			if (
+				captureMayStart
+				&& state.phase !== "starting"
+				&& state.phase !== "transcribing"
+				&& state.phase !== "stopping"
+				&& state.phase !== "error"
+			) {
+				const started = startCapture(ctx, {
+					stopModeOnFailure: false,
+					updatePhase: state.phase === "standby" || state.phase === "listening",
+				});
+				if (!started && !state.capture) {
+					state.inputEnabled = false;
+					setPhase(state.agentActive ? "thinking" : "standby", ctx);
+					notify(ctx, "Could not start microphone capture.", "error");
+					return false;
+				}
+			} else {
+				setPhase(state.phase, ctx);
+			}
+		}
+		if (options.notify !== false) notify(ctx, `Talk input ${enabled ? "on" : "off"}.`);
+		return true;
+	}
+
+	function setOutputEnabled(
+		enabled: boolean,
+		ctx: TalkContext | undefined = state.ctx,
+		options: TalkControlOptions = {},
+	): boolean {
+		if (!state.enabled) {
+			if (options.notify !== false) notify(ctx, "Talk mode is off. Use /talk on first.", "warning");
+			return false;
+		}
+		if (state.outputEnabled === enabled) {
+			if (options.notify !== false) notify(ctx, `Talk output is already ${enabled ? "on" : "off"}.`);
+			return false;
+		}
+
+		state.outputEnabled = enabled;
+		if (!enabled) {
+			const wasSpeaking = state.phase === "speaking" || state.playbackActive || state.sharedPlaybackActive;
+			cancelSpeechQueue();
+			if (wasSpeaking) {
+				if (state.inputEnabled && !state.capture) {
+					startCapture(ctx, {
+						stopModeOnFailure: false,
+						updatePhase: false,
+					});
+				}
+				setPhase(state.agentActive ? "thinking" : readyPhase(), ctx);
+			} else {
+				setPhase(state.phase, ctx);
+			}
+		} else {
+			setPhase(state.phase, ctx);
+		}
+		if (options.notify !== false) notify(ctx, `Talk output ${enabled ? "on" : "off"}.`);
+		return true;
+	}
+
+	async function enable(
+		ctx: TalkContext,
+		options: TalkEnableOptions = {},
+	): Promise<boolean> {
 		state.ctx = ctx;
 		if (state.enabled || state.phase === "starting") {
 			notify(ctx, "Talk mode is already on.");
@@ -734,6 +869,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 
 		const epoch = ++state.lifecycleEpoch;
 		state.config = structuredClone(dependencies.getConfig());
+		state.inputEnabled = options.inputEnabled ?? true;
+		state.outputEnabled = options.outputEnabled ?? true;
 		state.prepareAbort = new AbortController();
 		setPhase("starting", ctx);
 
@@ -772,14 +909,22 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			if (state.lifecycleEpoch !== epoch) throw makeAbortError();
 			state.enabled = true;
 			applyConstraints(ctx);
-			if (!startCapture(ctx, { stopModeOnFailure: false })) throw new Error("Could not start microphone capture.");
-			notify(
-				ctx,
-				`Talk mode on. Local ${state.config.talk.sttModel} input, local ${state.config.talk.ttsModel} speech, ${state.config.talk.thinkingLevel} thinking.`,
-			);
+			if (state.inputEnabled) {
+				if (!startCapture(ctx, { stopModeOnFailure: false })) throw new Error("Could not start microphone capture.");
+			} else {
+				setPhase("standby", ctx);
+			}
+			if (options.notify !== false) {
+				notify(
+					ctx,
+					`Talk mode on. Input ${state.inputEnabled ? "on" : "off"}, output ${state.outputEnabled ? "on" : "off"}, ${state.config.talk.thinkingLevel} thinking.`,
+				);
+			}
 			return true;
 		} catch (error) {
 			state.enabled = false;
+			state.inputEnabled = false;
+			state.outputEnabled = false;
 			stopCapture("SIGKILL");
 			state.speechDetector = undefined;
 			await closeAudioRoute(ctx);
@@ -808,6 +953,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 		++state.lifecycleEpoch;
 		state.enabled = false;
+		state.inputEnabled = false;
+		state.outputEnabled = false;
 		state.agentActive = false;
 		state.interruptionInProgress = false;
 		state.pendingBargeTurn = false;
@@ -924,7 +1071,13 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		const lifecycleEpoch = state.lifecycleEpoch;
 		const speechEpoch = state.speechEpoch;
 		state.speechTail = state.speechTail.catch(() => {}).then(async () => {
-			if (speechEpoch !== state.speechEpoch || !runIsCurrent(runId, lifecycleEpoch) || !state.config || !state.ctx) return;
+			if (
+				!state.outputEnabled
+				|| speechEpoch !== state.speechEpoch
+				|| !runIsCurrent(runId, lifecycleEpoch)
+				|| !state.config
+				|| !state.ctx
+			) return;
 			// Headphone mode keeps capture open so sustained near-end speech can
 			// cancel playback. The default remains feedback-safe half duplex.
 			if (!bargeInEnabled()) stopCapture();
@@ -972,7 +1125,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	}
 
 	function maybeSpeakMessage(message: any, isFinal: boolean): void {
-		if (!currentRunAcceptsEvents()) return;
+		if (!state.outputEnabled || !currentRunAcceptsEvents()) return;
 		if (message?.role !== "assistant") return;
 		const runId = state.currentRun!.id;
 		const messageId = messageKey(message);
@@ -1100,11 +1253,9 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 		if (!runIsCurrent(runId, lifecycleEpoch) || speechEpoch !== state.speechEpoch) return;
 		state.agentActive = false;
-		// Headphone and echo-cancelled modes intentionally keep the existing
-		// capture process alive through speech. Restore the externally visible
-		// listening phase even when startCapture() therefore has no work to do.
 		if (state.capture) setPhase("listening");
-		else startCapture();
+		else if (state.inputEnabled) startCapture();
+		else setPhase("standby");
 	}
 
 	function handleInput(ctx: TalkContext): void {
@@ -1145,6 +1296,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			: config.bargeIn.mode;
 		return [
 			`Talk mode: ${state.enabled ? state.phase : "off"}`,
+			`input: ${state.inputEnabled ? "on" : "off"}`,
+			`output: ${state.outputEnabled ? "on" : "off"}`,
 			`STT: local ${config.sttModel}`,
 			"speech validation: local Silero VAD",
 			`TTS: local ${config.ttsModel}, voice ${config.ttsVoiceId}`,
@@ -1158,6 +1311,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	return {
 		enable,
 		disable,
+		setInputEnabled,
+		setOutputEnabled,
 		beginAgentRun,
 		handleTurnStart,
 		handleMessageUpdate,
@@ -1173,6 +1328,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		ownsCurrentRun,
 		suppressesGeneralSpeech: () => state.generalSpeechSuppressed,
 		isEnabled: () => state.enabled,
+		isInputEnabled: () => state.inputEnabled,
+		isOutputEnabled: () => state.outputEnabled,
 		getPhase: () => state.phase,
 		statusLines,
 		_state: state,
