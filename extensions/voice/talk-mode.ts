@@ -1250,24 +1250,28 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		await Promise.resolve();
 		const pendingSpeech = state.speechTail;
 		try { await pendingSpeech; } catch {}
-		if (!runIsCurrent(runId, lifecycleEpoch) || speechEpoch !== state.speechEpoch) return;
-		if (state.sharedPlaybackActive) {
+		if (!runIsCurrent(runId, lifecycleEpoch)) return;
+		if (speechEpoch === state.speechEpoch && state.sharedPlaybackActive) {
 			const pendingCompletion = state.speechCompletionTail;
 			try { await pendingCompletion; } catch {}
-			if (!runIsCurrent(runId, lifecycleEpoch) || speechEpoch !== state.speechEpoch) return;
-			try {
-				await dependencies.finishSpeech?.();
-			} catch (error) {
-				if ((error as Error)?.name !== "AbortError") {
-					notify(state.ctx, `Talk playback failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			if (!runIsCurrent(runId, lifecycleEpoch)) return;
+			if (speechEpoch === state.speechEpoch) {
+				try {
+					await dependencies.finishSpeech?.();
+				} catch (error) {
+					if ((error as Error)?.name !== "AbortError") {
+						notify(state.ctx, `Talk playback failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+					}
 				}
+				state.sharedPlaybackActive = false;
+				state.playbackActive = false;
+				state.speechTimingAbort = undefined;
+				state.speechCompletionTail = Promise.resolve();
 			}
-			state.sharedPlaybackActive = false;
-			state.playbackActive = false;
-			state.speechTimingAbort = undefined;
-			state.speechCompletionTail = Promise.resolve();
 		}
-		if (!runIsCurrent(runId, lifecycleEpoch) || speechEpoch !== state.speechEpoch) return;
+		if (!runIsCurrent(runId, lifecycleEpoch) || state.interruptionInProgress) return;
+		// Barge-in owns the phase until its continuation starts. Other playback
+		// cancellation changes the speech epoch but not the settled model run.
 		state.agentActive = false;
 		if (state.capture) setPhase("listening");
 		else if (state.inputEnabled) startCapture();

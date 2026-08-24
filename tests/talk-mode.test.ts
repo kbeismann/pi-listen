@@ -569,10 +569,15 @@ describe("continuous talk mode", () => {
 		expect(harness.mode.getPhase()).toBe("off");
 	});
 
-	test("output off stops playback without disabling talk mode", async () => {
+	test("output off during settlement stops playback without disabling talk mode", async () => {
 		let speechAborted = false;
+		let markSpeechStarted: (() => void) | undefined;
+		const speechStarted = new Promise<void>((resolve) => {
+			markSpeechStarted = resolve;
+		});
 		const harness = makeHarness({
 			speak: async (_text, _config, _ctx, signal) => new Promise<void>((_resolve, reject) => {
+				markSpeechStarted?.();
 				const abort = () => {
 					speechAborted = true;
 					const error = new Error("aborted");
@@ -596,12 +601,13 @@ describe("continuous talk mode", () => {
 				content: [{ type: "text", text: "Stop this spoken response." }],
 			},
 		});
-		await Bun.sleep(5);
+		await speechStarted;
 
+		const settlement = harness.mode.handleAgentSettled();
 		expect(harness.mode.setOutputEnabled(false, harness.context as any, {
 			notify: false,
 		})).toBe(true);
-		await harness.mode.handleAgentSettled();
+		await settlement;
 		expect(speechAborted).toBe(true);
 		expect(harness.mode.isEnabled()).toBe(true);
 		expect(harness.mode.getPhase()).toBe("standby");
