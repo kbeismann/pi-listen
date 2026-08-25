@@ -72,9 +72,13 @@ function makeContext(pi: MockPi) {
 	const notifications: Array<{ message: string; level: string }> = [];
 	const statuses = new Map<string, string | undefined>();
 	const footerUpdates: any[] = [];
+	const widgetUpdates: Array<{ key: string; content: any; options: any }> = [];
+	let widgetComponent: any;
+	let widgetRenderRequests = 0;
 	let abortCount = 0;
 	return {
 		hasUI: true,
+		mode: "tui",
 		cwd: "/tmp/project",
 		get model() { return pi.model; },
 		modelRegistry: {
@@ -94,10 +98,19 @@ function makeContext(pi: MockPi) {
 			notify(message: string, level: string) { notifications.push({ message, level }); },
 			setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
 			setFooter(factory: any) { footerUpdates.push(factory); },
+			setWidget(key: string, content: any, options?: any) {
+				widgetUpdates.push({ key, content, options });
+				widgetComponent = typeof content === "function"
+					? content({ requestRender: () => { widgetRenderRequests += 1; } }, {})
+					: undefined;
+			},
 		},
 		notifications,
 		statuses,
 		footerUpdates,
+		widgetUpdates,
+		get widgetComponent() { return widgetComponent; },
+		get widgetRenderRequests() { return widgetRenderRequests; },
 		get abortCount() { return abortCount; },
 	};
 }
@@ -180,33 +193,54 @@ describe("continuous talk mode", () => {
 		expect(TALK_SYSTEM_PROMPT).toContain("Arbitrary shell commands remain unavailable");
 	});
 
-	test("renders talk mode as a full-width neon-magenta footer", async () => {
+	test("renders Talk on one dedicated line without replacing Pi's footer", async () => {
 		const { context, mode } = makeHarness();
 
 		expect(await mode.enable(context as any)).toBe(true);
-		const activeStatus = context.statuses.get("continuous-talk");
-		expect(activeStatus).toStartWith("\x1b[0;1;38;2;0;0;0;48;2;255;0;255m");
-		expect(activeStatus).toContain("TALK MODE ON | LISTENING | INPUT ON | OUTPUT ON");
-		expect(activeStatus).toEndWith("\x1b[0m");
-
-		const footerFactory = context.footerUpdates.find((update) => typeof update === "function");
-		const footer = footerFactory({}, {}, {});
-		const footerLine = footer.render(72)[0];
-		const plainFooterLine = footerLine.replace(/\x1b\[[0-9;]*m/g, "");
-		expect(footerLine).toStartWith("\x1b[0;1;38;2;0;0;0;48;2;255;0;255m");
-		expect(footerLine).toEndWith("\x1b[0m");
-		expect(plainFooterLine).toHaveLength(72);
-		expect(plainFooterLine.trim()).toBe("TALK MODE ON | LISTENING | INPUT ON | OUTPUT ON");
-		expect(context.footerUpdates).toHaveLength(1);
+		expect(context.statuses.get("continuous-talk")).toBeUndefined();
+		expect(context.footerUpdates).toHaveLength(0);
+		expect(context.widgetUpdates).toHaveLength(1);
+		expect(context.widgetUpdates[0]!.key).toBe("continuous-talk");
+		expect(context.widgetUpdates[0]!.options).toEqual({ placement: "belowEditor" });
+		const widget = context.widgetComponent;
+		const activeLine = widget.render(72)[0];
+		const plainActiveLine = activeLine.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(activeLine).toStartWith("\x1b[0;1;38;2;0;0;0;48;2;255;0;255m");
+		expect(activeLine).toEndWith("\x1b[0m");
+		expect(plainActiveLine.trim()).toBe(
+			"TALK MODE ON | LISTENING | OUTPUT ON | INPUT ON",
+		);
+		expect(widget.render(20)[0].replace(/\x1b\[[0-9;]*m/g, "").length).toBeLessThanOrEqual(20);
 
 		mode.handleInput(context as any);
-		const thinkingLine = footer.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "");
-		expect(thinkingLine.trim()).toBe("TALK MODE ON | THINKING | INPUT ON | OUTPUT ON");
-		expect(context.footerUpdates).toHaveLength(1);
+		const thinkingLine = widget.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "");
+		expect(thinkingLine.trim()).toBe(
+			"TALK MODE ON | THINKING | OUTPUT ON | INPUT ON",
+		);
+		expect(context.widgetUpdates).toHaveLength(1);
+		expect(context.widgetRenderRequests).toBeGreaterThan(0);
 
 		await mode.disable(context as any, { notify: false });
 		expect(context.statuses.get("continuous-talk")).toBeUndefined();
-		expect(context.footerUpdates.at(-1)).toBeUndefined();
+		expect(context.widgetUpdates.at(-1)).toEqual({
+			key: "continuous-talk",
+			content: undefined,
+			options: undefined,
+		});
+	});
+
+	test("keeps complete Talk state in the status fallback outside the TUI", async () => {
+		const { context, mode } = makeHarness();
+		context.mode = "rpc";
+
+		expect(await mode.enable(context as any)).toBe(true);
+		expect(context.statuses.get("continuous-talk")).toContain(
+			"TALK MODE ON | LISTENING | OUTPUT ON | INPUT ON",
+		);
+		expect(context.widgetUpdates).toHaveLength(0);
+
+		await mode.disable(context as any, { notify: false });
+		expect(context.statuses.get("continuous-talk")).toBeUndefined();
 	});
 
 	test("controls continuous input and spoken output independently", async () => {
@@ -221,6 +255,10 @@ describe("continuous talk mode", () => {
 		expect(harness.mode.isInputEnabled()).toBe(false);
 		expect(harness.mode.isOutputEnabled()).toBe(false);
 		expect(harness.captures).toEqual([]);
+		const widget = harness.context.widgetComponent;
+		expect(widget.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "").trim()).toBe(
+			"TALK MODE ON | STANDBY | OUTPUT OFF | INPUT OFF",
+		);
 
 		await harness.mode.beginAgentRun("base", harness.context as any);
 		harness.mode.handleMessageEnd({
@@ -237,6 +275,9 @@ describe("continuous talk mode", () => {
 		expect(harness.mode.setOutputEnabled(true, harness.context as any, {
 			notify: false,
 		})).toBe(true);
+		expect(widget.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "").trim()).toBe(
+			"TALK MODE ON | STANDBY | OUTPUT ON | INPUT OFF",
+		);
 		harness.mode.handleTurnStart(harness.context as any);
 		harness.mode.handleMessageEnd({
 			message: {
@@ -253,12 +294,18 @@ describe("continuous talk mode", () => {
 			notify: false,
 		})).toBe(true);
 		expect(harness.mode.getPhase()).toBe("listening");
+		expect(widget.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "").trim()).toBe(
+			"TALK MODE ON | LISTENING | OUTPUT ON | INPUT ON",
+		);
 		expect(harness.captures).toHaveLength(1);
 		expect(harness.mode.setInputEnabled(false, harness.context as any, {
 			notify: false,
 		})).toBe(true);
 		expect(harness.captures[0]!.killedWith).toBe("SIGKILL");
 		expect(harness.mode.getPhase()).toBe("standby");
+		expect(widget.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "").trim()).toBe(
+			"TALK MODE ON | STANDBY | OUTPUT ON | INPUT OFF",
+		);
 		expect(harness.mode.statusLines()).toContain("input: off");
 		expect(harness.mode.statusLines()).toContain("output: on");
 
@@ -477,6 +524,7 @@ describe("continuous talk mode", () => {
 		expect(pi.activeTools).toEqual(originalTools);
 		expect(captures).toHaveLength(0);
 		expect(mode.getPhase()).toBe("off");
+		expect(context.widgetUpdates.at(-1)?.content).toBeUndefined();
 	});
 
 	test("retains the previous model snapshot until restoration succeeds", async () => {

@@ -4,6 +4,7 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
+import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { ContinuousTalkConfig, VoiceConfig } from "./config";
 import { createEnergyVad } from "./energy-vad";
 import type { TalkAudioRoute } from "./pipewire-aec";
@@ -171,44 +172,41 @@ function isSubstantiveInterruption(text: string): boolean {
 
 function talkStateLabel(
 	phase: Exclude<TalkPhase, "off">,
-	inputEnabled: boolean,
 	outputEnabled: boolean,
+	inputEnabled: boolean,
 ): string {
 	const phaseLabel = phase === "starting" || phase === "stopping" || phase === "error"
 		? phase.toUpperCase()
 		: `ON | ${phase.toUpperCase()}`;
-	return `${phaseLabel} | INPUT ${inputEnabled ? "ON" : "OFF"} | OUTPUT ${outputEnabled ? "ON" : "OFF"}`;
+	return `${phaseLabel} | OUTPUT ${outputEnabled ? "ON" : "OFF"} | INPUT ${inputEnabled ? "ON" : "OFF"}`;
 }
 
 /**
- * Keep a text badge for non-TUI clients, and replace Pi's normal footer with a
- * full-width banner in the interactive TUI. The fixed true-color neon magenta is
- * deliberately independent of the active theme so talk mode's microphone
+ * Keep Talk's phase and independent voice gates on a dedicated line without
+ * replacing Pi's normal footer. Talk owns this persistent state presentation
+ * so integrations do not have to duplicate it. The fixed true-color neon
+ * magenta is deliberately independent of the active theme so Talk's microphone
  * ownership and read-only tool constraints are unmistakable at a glance.
  */
 function formatTalkStatus(
 	phase: Exclude<TalkPhase, "off">,
-	inputEnabled: boolean,
 	outputEnabled: boolean,
+	inputEnabled: boolean,
 ): string {
-	return `${TALK_MODE_HIGHLIGHT} TALK MODE ${talkStateLabel(phase, inputEnabled, outputEnabled)} ${ANSI_RESET}`;
+	return `${TALK_MODE_HIGHLIGHT} TALK MODE ${talkStateLabel(phase, outputEnabled, inputEnabled)} ${ANSI_RESET}`;
 }
 
-function formatTalkFooterLine(
+function formatTalkWidgetLine(
 	phase: Exclude<TalkPhase, "off">,
-	inputEnabled: boolean,
 	outputEnabled: boolean,
+	inputEnabled: boolean,
 	width: number,
 ): string {
-	const targetWidth = Math.max(0, Math.floor(width));
-	if (targetWidth === 0) return "";
-	const label = ` TALK MODE ${talkStateLabel(phase, inputEnabled, outputEnabled)} `;
-	const visibleLabel = label.slice(0, targetWidth);
-	const availablePadding = targetWidth - visibleLabel.length;
-	const leftPadding = Math.floor(availablePadding / 2);
-	const rightPadding = availablePadding - leftPadding;
-	const line = `${" ".repeat(leftPadding)}${visibleLabel}${" ".repeat(rightPadding)}`;
-	return `${TALK_MODE_HIGHLIGHT}${line}${ANSI_RESET}`;
+	return truncateToWidth(
+		formatTalkStatus(phase, outputEnabled, inputEnabled),
+		Math.max(0, Math.floor(width)),
+		"",
+	);
 }
 
 /**
@@ -225,7 +223,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		inputEnabled: false,
 		outputEnabled: false,
 		phase: "off" as TalkPhase,
-		talkFooterActive: false,
+		talkWidgetActive: false,
+		requestTalkWidgetRender: undefined as (() => void) | undefined,
 		lifecycleEpoch: 0,
 		runCounter: 0,
 		currentRun: undefined as TalkRun | undefined,
@@ -270,32 +269,49 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		const target = ctx ?? state.ctx;
 		if (!target?.hasUI || !target.ui) return;
 		if (phase === "off") {
-			if (state.talkFooterActive) {
-				target.ui.setFooter(undefined);
-				state.talkFooterActive = false;
+			if (state.talkWidgetActive) {
+				target.ui.setWidget(STATUS_KEY, undefined);
+				state.talkWidgetActive = false;
+				state.requestTalkWidgetRender = undefined;
 			}
 			target.ui.setStatus(STATUS_KEY, undefined);
 			return;
 		}
-		if (!state.talkFooterActive) {
-			target.ui.setFooter(() => ({
-				invalidate() {},
-				render(width: number): string[] {
-					const visiblePhase = state.phase === "off" ? "stopping" : state.phase;
-					return [formatTalkFooterLine(
-						visiblePhase,
-						state.inputEnabled,
-						state.outputEnabled,
-						width,
-					)];
-				},
-			}));
-			state.talkFooterActive = true;
+		// Pi releases before run-mode contexts exposed `mode`; those releases
+		// only supplied this UI path to their interactive runtime.
+		if ((target as TalkContext & { mode?: string }).mode !== undefined
+			&& (target as TalkContext & { mode?: string }).mode !== "tui") {
+			target.ui.setStatus(
+				STATUS_KEY,
+				formatTalkStatus(phase, state.outputEnabled, state.inputEnabled),
+			);
+			return;
 		}
-		target.ui.setStatus(
-			STATUS_KEY,
-			formatTalkStatus(phase, state.inputEnabled, state.outputEnabled),
-		);
+		target.ui.setStatus(STATUS_KEY, undefined);
+		if (!state.talkWidgetActive) {
+			target.ui.setWidget(
+				STATUS_KEY,
+				(tui) => {
+					state.requestTalkWidgetRender = () => tui.requestRender();
+					return {
+						invalidate() {},
+						render(width: number): string[] {
+							const visiblePhase = state.phase === "off" ? "stopping" : state.phase;
+							return [formatTalkWidgetLine(
+								visiblePhase,
+								state.outputEnabled,
+								state.inputEnabled,
+								width,
+							)];
+						},
+					};
+				},
+				{ placement: "belowEditor" },
+			);
+			state.talkWidgetActive = true;
+			return;
+		}
+		state.requestTalkWidgetRender?.();
 	}
 
 	function readyPhase(): "listening" | "standby" {
