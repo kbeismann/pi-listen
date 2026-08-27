@@ -30,6 +30,8 @@ export interface ContinuousTalkConfig {
 	sttModel: string;
 	ttsModel: string;
 	ttsVoiceId: number;
+	/** Expose Talk's input and output gates through its local Unix socket. */
+	voiceControl: boolean;
 	/** Optional headphone-safe interruption while the agent is answering. */
 	bargeIn: {
 		mode: TalkBargeInMode;
@@ -168,6 +170,7 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 		sttModel: "parakeet-v3",
 		ttsModel: "kokoro-en-v0_19",
 		ttsVoiceId: 0,
+		voiceControl: false,
 		bargeIn: {
 			mode: "off",
 			minSpeechMs: 250,
@@ -238,6 +241,9 @@ function normalizeTalkConfig(input: any): ContinuousTalkConfig {
 			? input.ttsModel.trim()
 			: defaults.ttsModel,
 		ttsVoiceId: finiteInRange(input?.ttsVoiceId, defaults.ttsVoiceId, 0, 10_000),
+		voiceControl: typeof input?.voiceControl === "boolean"
+			? input.voiceControl
+			: defaults.voiceControl,
 		bargeIn: {
 			mode: TALK_BARGE_IN_MODES.has(rawBargeIn?.mode)
 				? rawBargeIn.mode

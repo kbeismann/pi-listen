@@ -91,12 +91,10 @@ import {
 	getLanguagesForLocalModel, isLanguageSupportedByModel, localLanguageDisplayName,
 	type LocalSession,
 } from "./voice/local";
-import { createTalkMode } from "./voice/talk-mode";
+import { createTalkMode, type TalkInputPreemptionLease } from "./voice/talk-mode";
 import { installTalkIntegration } from "./voice/talk-integration";
-import {
-	acquireDictationPreemption,
-	type DictationPreemptionLease,
-} from "./voice/dictation-preemption";
+import { acquireTalkInputPreemption } from "./voice/talk-input-preemption";
+import { createTalkVoiceControlServer } from "./voice/talk-voice-control";
 import { createTalkSpeechOutput } from "./voice/talk-speech-output";
 import { createPipeWireEchoCancellation } from "./voice/pipewire-aec";
 import { createSherpaSpeechDetector, prepareSherpaVad } from "./voice/sherpa-vad";
@@ -689,9 +687,7 @@ export default function (pi: ExtensionAPI) {
 	// Streaming session state
 	let activeSession: VoiceSession | null = null;
 	let preRecordingSession: StreamingSession | null = null;  // Started during warmup, promoted on confirm (Deepgram only)
-	let dictationPreemptionLease: DictationPreemptionLease | null = null;
-	let dictationPreemptionPending: Promise<DictationPreemptionLease> | null = null;
-	let dictationPreemptionGeneration = 0;
+	let dictationPreemptionLease: TalkInputPreemptionLease | null = null;
 
 	let lastStopTime = 0;    // For Escape-to-clear-editor within 30s of recording
 	let lastEscapeTime = 0;  // For double-escape to clear editor
@@ -794,8 +790,6 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function releaseDictationPreemption(): void {
-		dictationPreemptionGeneration += 1;
-		dictationPreemptionPending = null;
 		const lease = dictationPreemptionLease;
 		dictationPreemptionLease = null;
 		try { lease?.release(); } catch {}
@@ -803,45 +797,13 @@ export default function (pi: ExtensionAPI) {
 
 	async function ensureDictationPreemption(): Promise<boolean> {
 		if (dictationPreemptionLease) return true;
-		if (!dictationPreemptionPending) {
-			const generation = dictationPreemptionGeneration;
-			const pending = acquireDictationPreemption(pi);
-			dictationPreemptionPending = pending;
-			void pending.then((lease) => {
-				if (
-					dictationPreemptionPending !== pending
-					|| dictationPreemptionGeneration !== generation
-				) {
-					lease.release();
-					return;
-				}
-				dictationPreemptionPending = null;
-				dictationPreemptionLease = lease;
-			}, () => {
-				if (dictationPreemptionPending === pending) {
-					dictationPreemptionPending = null;
-				}
-			});
-		}
-		const pending = dictationPreemptionPending;
-		if (!pending) return dictationPreemptionLease !== null;
-		await pending;
-		return dictationPreemptionLease !== null;
+		dictationPreemptionLease = acquireTalkInputPreemption(talkMode, ctx ?? undefined);
+		return true;
 	}
 
 	function prepareWarmupDictationPreemption(): void {
 		void ensureDictationPreemption().then((acquired) => {
 			if (acquired && voiceState === "warmup") startPreRecording();
-		}).catch((error) => {
-			if (voiceState !== "warmup") return;
-			clearWarmupWidget();
-			hideWidget();
-			resetHoldState();
-			setVoiceState("idle");
-			ctx?.ui.notify(
-				`Could not take microphone priority: ${error instanceof Error ? error.message : String(error)}`,
-				"error",
-			);
 		});
 	}
 
@@ -1204,10 +1166,6 @@ export default function (pi: ExtensionAPI) {
 	async function startVoiceRecording(): Promise<boolean> {
 		voiceDebug("startVoiceRecording called", { voiceState, hasUI: !!ctx?.hasUI, starting: _startingRecording });
 		if (!ctx?.hasUI) return false;
-		if (talkMode?.isEnabled()) {
-			ctx.ui.notify("Hands-free talk mode owns the microphone. Use /talk off before starting dictation.", "warning");
-			return false;
-		}
 		if (_startingRecording) return false; // Prevent overlapping starts during corruption guard sleep
 		_startingRecording = true;
 
@@ -1240,11 +1198,6 @@ export default function (pi: ExtensionAPI) {
 			return false;
 		}
 		if (!microphonePriorityAcquired) return false;
-		if (talkMode?.isEnabled()) {
-			ctx.ui.notify("Hands-free talk mode owns the microphone. Use /talk off before starting dictation.", "warning");
-			setVoiceState("idle");
-			return false;
-		}
 
 		// ── STALE TRANSCRIPT CLEANUP ──
 		// Don't hideWidget() here — the warmup widget is still showing and
@@ -1718,11 +1671,6 @@ export default function (pi: ExtensionAPI) {
 
 			// ── SPACE handling ──
 			if (matchesKey(data, "space")) {
-				// Talk owns every microphone interaction in its own Pi session.
-				// Leave SPACE to the editor without warmup, pre-recording, widgets,
-				// or a late ownership warning from startVoiceRecording().
-				if (talkMode?.isEnabled()) return undefined;
-
 				// ── ERROR COOLDOWN: block all voice activation for 5s after an error ──
 				if (errorCooldownUntil > Date.now()) {
 					// During cooldown, let space through as a normal character
@@ -3305,11 +3253,12 @@ export default function (pi: ExtensionAPI) {
 	// ─── Hands-free /talk mode ─────────────────────────────────────────────
 	//
 	// /talk deliberately uses an audio path separate from hold-to-talk. It
-	// always selects the configured local STT and TTS models and restores the
-	// previous model state on exit. Optional PipeWire routing exists only for the
-	// /talk lifecycle and is removed when the mode stops.
+	// always selects the configured local STT and TTS models. Optional PipeWire
+	// routing and local gate control exist only for the /talk lifecycle and are
+	// removed when the mode stops.
 	let publishTalkState = (): void => {};
 	const talkSpeechOutput = createTalkSpeechOutput();
+	let talkVoiceControl: ReturnType<typeof createTalkVoiceControlServer> | null = null;
 	const continuousTalk = createTalkMode(pi, {
 		getConfig: () => config,
 		spawnCapture: (audioRoute) => {
@@ -3391,6 +3340,31 @@ export default function (pi: ExtensionAPI) {
 			talkSpeechOutput.queue(text, voiceConfig, signal, audioRoute, onPlaybackStart),
 		finishSpeech: () => talkSpeechOutput.finish(),
 		cancelSpeech: () => talkSpeechOutput.cancel(),
+		startVoiceControl: async (voiceConfig) => {
+			if (!voiceConfig.talk.voiceControl) return;
+			talkVoiceControl ??= createTalkVoiceControlServer((channel, action) => {
+				const activeTalk = talkMode;
+				if (!activeTalk?.isEnabled()) throw new Error("Talk mode is off.");
+				const currentlyEnabled = channel === "input"
+					? activeTalk.isRequestedInputEnabled()
+					: activeTalk.isOutputEnabled();
+				if (action !== "status") {
+					const enabled = action === "toggle" ? !currentlyEnabled : action === "on";
+					if (channel === "input") activeTalk.setInputEnabled(enabled, undefined, { notify: false });
+					else activeTalk.setOutputEnabled(enabled, undefined, { notify: false });
+				}
+				return {
+					inputEnabled: activeTalk.isRequestedInputEnabled(),
+					outputEnabled: activeTalk.isOutputEnabled(),
+				};
+			}, (message) => voiceDebug("Talk voice control error", { message }));
+			await talkVoiceControl.start();
+		},
+		stopVoiceControl: async () => {
+			if (!talkVoiceControl) return;
+			await talkVoiceControl.stop();
+			talkVoiceControl = null;
+		},
 		onAudioChunk: updateAudioLevel,
 		onStateChange: () => publishTalkState(),
 	});
@@ -3462,7 +3436,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const [, control, action] = controlMatch;
 				const currentlyEnabled = control === "input"
-					? continuousTalk.isInputEnabled()
+					? continuousTalk.isRequestedInputEnabled()
 					: continuousTalk.isOutputEnabled();
 				const enabled = action === "toggle" ? !currentlyEnabled : action === "on";
 				if (control === "input") continuousTalk.setInputEnabled(enabled, cmdCtx);

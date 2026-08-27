@@ -168,7 +168,7 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 `/talk on` starts an automatic conversation loop. Speak normally; inexpensive energy detection buffers and endpoints the audio, while a local Silero neural VAD must validate actual speech before Parakeet can transcribe it. Pi answers, and the configured local TTS model speaks the answer. The speech models download automatically with no metered API. The microphone listens while Pi is thinking and between turns, so no key is held or pressed. `/talk off` immediately stops capture and playback.
 
-While Talk mode is active, hold-`SPACE` dictation is inactive in that Pi session and `SPACE` remains an ordinary editor key. Foreground dictation can temporarily take microphone priority; Talk resumes capture only if its input gate remains enabled.
+While Talk mode is active, hold-`SPACE` dictation remains available and temporarily takes microphone priority. Talk resumes capture only if its input gate remains enabled.
 
 Talk can start with input and output independently disabled. The input and output commands then enable either channel without changing Pi's active model, session permissions, or the other channel. Input remains continuous until disabled; it is a toggle rather than push-to-talk.
 
@@ -188,6 +188,14 @@ while active, the exact conversation instruction used by `/talk`. Other layers
 can use that instruction for custom turns, but cannot enable, disable, or
 change Talk's input or output gates.
 
+Set `voiceControl` to `true` to expose Talk's input and output gates through a
+bounded local Unix socket. The socket accepts only `input` or `output` followed
+by `on`, `off`, `toggle`, or `status`; it cannot start or stop Talk or submit
+conversation input. Its default path is `$XDG_RUNTIME_DIR/pi-talk-voice.sock`
+(or `/run/user/<uid>/pi-talk-voice.sock`), and `PI_TALK_VOICE_SOCKET` overrides
+that path. During foreground dictation, input responses report the latest
+requested state while capture remains preempted until the last lease releases.
+
 The defaults use `parakeet-v3` and `kokoro-en-v0_19`. Configure Talk's local speech models under `voice.talk`:
 
 ```json
@@ -197,6 +205,7 @@ The defaults use `parakeet-v3` and `kokoro-en-v0_19`. Configure Talk's local spe
       "sttModel": "parakeet-v3",
       "ttsModel": "kokoro-en-v0_19",
       "ttsVoiceId": 0,
+      "voiceControl": false,
       "bargeIn": {
         "mode": "off",
         "minSpeechMs": 250,

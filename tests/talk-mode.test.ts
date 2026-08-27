@@ -307,6 +307,73 @@ describe("continuous talk mode", () => {
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
+	test("restores only the latest requested input state after nested preemption", async () => {
+		const harness = makeHarness();
+		await harness.mode.enable(harness.context as any, { notify: false });
+		expect(harness.captures).toHaveLength(1);
+
+		const firstLease = harness.mode.acquireInputPreemption(harness.context as any);
+		const secondLease = harness.mode.acquireInputPreemption(harness.context as any);
+		expect(harness.mode.isRequestedInputEnabled()).toBe(true);
+		expect(harness.mode.isInputEnabled()).toBe(false);
+		expect(harness.captures[0]!.killedWith).toBe("SIGKILL");
+		expect(harness.mode.statusLines()).toContain("input: on (capture preempted)");
+
+		expect(harness.mode.setInputEnabled(false, harness.context as any, {
+			notify: false,
+		})).toBe(true);
+		firstLease.release();
+		expect(harness.mode.isRequestedInputEnabled()).toBe(false);
+		expect(harness.mode.isInputEnabled()).toBe(false);
+		expect(harness.captures).toHaveLength(1);
+
+		expect(harness.mode.setInputEnabled(true, harness.context as any, {
+			notify: false,
+		})).toBe(true);
+		expect(harness.mode.isRequestedInputEnabled()).toBe(true);
+		expect(harness.mode.isInputEnabled()).toBe(false);
+		expect(harness.captures).toHaveLength(1);
+
+		secondLease.release();
+		expect(harness.mode.isInputEnabled()).toBe(true);
+		expect(harness.captures).toHaveLength(2);
+		secondLease.release();
+		expect(harness.captures).toHaveLength(2);
+
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("starts and stops configured voice control with Talk", async () => {
+		let starts = 0;
+		let stops = 0;
+		const harness = makeHarness({
+			startVoiceControl: async () => { starts += 1; },
+			stopVoiceControl: async () => { stops += 1; },
+		});
+		harness.config.talk.voiceControl = true;
+
+		expect(await harness.mode.enable(harness.context as any, { notify: false })).toBe(true);
+		expect(starts).toBe(1);
+		expect(stops).toBe(0);
+		await harness.mode.disable(harness.context as any, { notify: false });
+		expect(stops).toBe(1);
+	});
+
+	test("rolls back Talk when configured voice control cannot start", async () => {
+		let stops = 0;
+		const harness = makeHarness({
+			startVoiceControl: async () => { throw new Error("socket already owned"); },
+			stopVoiceControl: async () => { stops += 1; },
+		});
+		harness.config.talk.voiceControl = true;
+
+		expect(await harness.mode.enable(harness.context as any, { notify: false })).toBe(false);
+		expect(stops).toBe(1);
+		expect(harness.captures).toEqual([]);
+		expect(harness.mode.getPhase()).toBe("off");
+		expect(harness.mode.isRequestedInputEnabled()).toBe(false);
+	});
+
 	test("keeps Pi's active model and thinking through Talk on, turns, and off", async () => {
 		const { pi, captures, spoken, context, mode } = makeHarness();
 		const originalTools = [...pi.activeTools];

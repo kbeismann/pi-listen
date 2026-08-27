@@ -14,6 +14,7 @@ export type TalkIntegrationContext = ExtensionContext | ExtensionCommandContext;
 export interface TalkStateSnapshot {
 	protocol: typeof TALK_SERVICE_PROTOCOL;
 	enabled: boolean;
+	/** Latest requested gate state; foreground dictation may temporarily preempt capture. */
 	inputEnabled: boolean;
 	outputEnabled: boolean;
 	phase: TalkPhase;
@@ -36,7 +37,7 @@ export interface TalkServiceRequest {
 
 interface TalkModeController {
 	isEnabled(): boolean;
-	isInputEnabled(): boolean;
+	isRequestedInputEnabled(): boolean;
 	isOutputEnabled(): boolean;
 	getPhase(): TalkPhase;
 }
@@ -53,7 +54,7 @@ export function installTalkIntegration(
 	const getState = (): TalkStateSnapshot => ({
 		protocol: TALK_SERVICE_PROTOCOL,
 		enabled: talkMode.isEnabled(),
-		inputEnabled: talkMode.isInputEnabled(),
+		inputEnabled: talkMode.isRequestedInputEnabled(),
 		outputEnabled: talkMode.isOutputEnabled(),
 		phase: talkMode.getPhase(),
 	});

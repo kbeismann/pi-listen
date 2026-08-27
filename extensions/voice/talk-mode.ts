@@ -24,6 +24,10 @@ export interface TalkControlOptions {
 	notify?: boolean;
 }
 
+export interface TalkInputPreemptionLease {
+	release(): void;
+}
+
 export interface TalkCapture {
 	process: ChildProcess;
 	tool: string;
@@ -55,6 +59,10 @@ export interface TalkModeDependencies {
 	finishSpeech?(): Promise<void>;
 	/** Cancel queued and active audio without affecting model generation. */
 	cancelSpeech?(): void;
+	/** Start Talk's optional local gate-control surface with the Talk lifecycle. */
+	startVoiceControl?(config: VoiceConfig): Promise<void>;
+	/** Stop Talk's optional local gate-control surface during cleanup. */
+	stopVoiceControl?(): Promise<void>;
 	onAudioChunk?(chunk: Buffer): void;
 	onStateChange?(): void;
 }
@@ -209,8 +217,10 @@ function formatTalkWidgetLine(
 export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependencies) {
 	const state = {
 		enabled: false,
+		requestedInputEnabled: false,
 		inputEnabled: false,
 		outputEnabled: false,
+		inputPreemptionLeases: 0,
 		phase: "off" as TalkPhase,
 		talkWidgetActive: false,
 		requestTalkWidgetRender: undefined as (() => void) | undefined,
@@ -677,6 +687,49 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 	}
 
+	function reconcileInputGate(ctx: TalkContext | undefined = state.ctx): boolean {
+		const shouldEnable = state.requestedInputEnabled && state.inputPreemptionLeases === 0;
+		if (state.inputEnabled === shouldEnable) {
+			setPhase(state.phase, ctx);
+			return true;
+		}
+
+		state.inputEnabled = shouldEnable;
+		if (!shouldEnable) {
+			stopCapture();
+			if (state.phase === "listening" || state.phase === "hearing") {
+				setPhase(state.agentActive ? "thinking" : "standby", ctx);
+			} else {
+				setPhase(state.phase, ctx);
+			}
+			return true;
+		}
+
+		const captureMayStart = !state.playbackActive || bargeInEnabled();
+		if (
+			captureMayStart
+			&& state.phase !== "starting"
+			&& state.phase !== "transcribing"
+			&& state.phase !== "stopping"
+			&& state.phase !== "error"
+		) {
+			const started = startCapture(ctx, {
+				stopModeOnFailure: false,
+				updatePhase: state.phase === "standby" || state.phase === "listening",
+			});
+			if (!started && !state.capture) {
+				state.requestedInputEnabled = false;
+				state.inputEnabled = false;
+				setPhase(state.agentActive ? "thinking" : "standby", ctx);
+				notify(ctx, "Could not start microphone capture.", "error");
+				return false;
+			}
+		} else {
+			setPhase(state.phase, ctx);
+		}
+		return true;
+	}
+
 	function setInputEnabled(
 		enabled: boolean,
 		ctx: TalkContext | undefined = state.ctx,
@@ -686,44 +739,37 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			if (options.notify !== false) notify(ctx, "Talk mode is off. Use /talk on first.", "warning");
 			return false;
 		}
-		if (state.inputEnabled === enabled) {
-			if (options.notify !== false) notify(ctx, `Talk input is already ${enabled ? "on" : "off"}.`);
+		if (state.requestedInputEnabled === enabled) {
+			if (options.notify !== false) notify(ctx, `Talk input is already requested ${enabled ? "on" : "off"}.`);
 			return false;
 		}
 
-		state.inputEnabled = enabled;
-		if (!enabled) {
-			stopCapture();
-			if (state.phase === "listening" || state.phase === "hearing") {
-				setPhase(state.agentActive ? "thinking" : "standby", ctx);
-			} else {
-				setPhase(state.phase, ctx);
-			}
-		} else {
-			const captureMayStart = !state.playbackActive || bargeInEnabled();
-			if (
-				captureMayStart
-				&& state.phase !== "starting"
-				&& state.phase !== "transcribing"
-				&& state.phase !== "stopping"
-				&& state.phase !== "error"
-			) {
-				const started = startCapture(ctx, {
-					stopModeOnFailure: false,
-					updatePhase: state.phase === "standby" || state.phase === "listening",
-				});
-				if (!started && !state.capture) {
-					state.inputEnabled = false;
-					setPhase(state.agentActive ? "thinking" : "standby", ctx);
-					notify(ctx, "Could not start microphone capture.", "error");
-					return false;
-				}
-			} else {
-				setPhase(state.phase, ctx);
-			}
+		state.requestedInputEnabled = enabled;
+		const changed = reconcileInputGate(ctx);
+		if (options.notify !== false) {
+			const suffix = enabled && state.inputPreemptionLeases > 0
+				? "; waiting for foreground dictation"
+				: ".";
+			notify(ctx, `Talk input requested ${enabled ? "on" : "off"}${suffix}`);
 		}
-		if (options.notify !== false) notify(ctx, `Talk input ${enabled ? "on" : "off"}.`);
-		return true;
+		return changed;
+	}
+
+	function acquireInputPreemption(ctx: TalkContext | undefined = state.ctx): TalkInputPreemptionLease {
+		if (!state.enabled) return { release() {} };
+		const lifecycleEpoch = state.lifecycleEpoch;
+		state.inputPreemptionLeases += 1;
+		reconcileInputGate(ctx);
+		let released = false;
+		return {
+			release() {
+				if (released) return;
+				released = true;
+				if (state.lifecycleEpoch !== lifecycleEpoch || state.inputPreemptionLeases === 0) return;
+				state.inputPreemptionLeases -= 1;
+				reconcileInputGate(ctx);
+			},
+		};
 	}
 
 	function setOutputEnabled(
@@ -781,8 +827,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 		const epoch = ++state.lifecycleEpoch;
 		state.config = structuredClone(dependencies.getConfig());
-		state.inputEnabled = options.inputEnabled ?? true;
+		state.requestedInputEnabled = options.inputEnabled ?? true;
+		state.inputEnabled = state.requestedInputEnabled;
 		state.outputEnabled = options.outputEnabled ?? true;
+		state.inputPreemptionLeases = 0;
 		state.prepareAbort = new AbortController();
 		setPhase("starting", ctx);
 
@@ -816,6 +864,9 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			}
 			if (state.lifecycleEpoch !== epoch) throw makeAbortError();
 			state.enabled = true;
+			if (state.config.talk.voiceControl) {
+				await dependencies.startVoiceControl?.(state.config);
+			}
 			if (state.inputEnabled) {
 				if (!startCapture(ctx, { stopModeOnFailure: false })) throw new Error("Could not start microphone capture.");
 			} else {
@@ -830,10 +881,13 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			return true;
 		} catch (error) {
 			state.enabled = false;
+			state.requestedInputEnabled = false;
 			state.inputEnabled = false;
 			state.outputEnabled = false;
+			state.inputPreemptionLeases = 0;
 			stopCapture("SIGKILL");
 			state.speechDetector = undefined;
+			try { await dependencies.stopVoiceControl?.(); } catch {}
 			await closeAudioRoute(ctx);
 			setPhase("off", ctx);
 			if ((error as Error)?.name !== "AbortError") {
@@ -857,8 +911,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 		++state.lifecycleEpoch;
 		state.enabled = false;
+		state.requestedInputEnabled = false;
 		state.inputEnabled = false;
 		state.outputEnabled = false;
+		state.inputPreemptionLeases = 0;
 		state.agentActive = false;
 		state.interruptionInProgress = false;
 		state.pendingBargeTurn = false;
@@ -871,6 +927,11 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.speechAbort = undefined;
 		stopCapture("SIGKILL");
 		state.speechDetector = undefined;
+		try {
+			await dependencies.stopVoiceControl?.();
+		} catch (error) {
+			notify(ctx, `Could not stop Talk voice control: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
 		state.messageStreams.clear();
 		try { await state.speechTail; } catch {}
 		if (options.awaitTranscription && state.transcription) {
@@ -1165,7 +1226,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			: config.bargeIn.mode;
 		return [
 			`Talk mode: ${state.enabled ? state.phase : "off"}`,
-			`input: ${state.inputEnabled ? "on" : "off"}`,
+			`input: ${state.requestedInputEnabled ? "on" : "off"}${state.inputPreemptionLeases > 0 ? " (capture preempted)" : ""}`,
 			`output: ${state.outputEnabled ? "on" : "off"}`,
 			`STT: local ${config.sttModel}`,
 			"speech validation: local Silero VAD",
@@ -1179,6 +1240,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		enable,
 		disable,
 		setInputEnabled,
+		acquireInputPreemption,
 		setOutputEnabled,
 		beginAgentRun,
 		handleTurnStart,
@@ -1192,6 +1254,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		ownsCurrentRun,
 		suppressesGeneralSpeech: () => state.generalSpeechSuppressed,
 		isEnabled: () => state.enabled,
+		isRequestedInputEnabled: () => state.requestedInputEnabled,
 		isInputEnabled: () => state.inputEnabled,
 		isOutputEnabled: () => state.outputEnabled,
 		getPhase: () => state.phase,

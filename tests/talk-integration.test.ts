@@ -35,12 +35,12 @@ describe("Talk integration service", () => {
 	test("publishes v4 read-only state and the canonical active instructions", () => {
 		const events = new FakeEventBus();
 		let enabled = false;
-		let inputEnabled = false;
+		let requestedInputEnabled = false;
 		let outputEnabled = false;
 		let phase: TalkPhase = "off";
 		const mode = {
 			isEnabled: () => enabled,
-			isInputEnabled: () => inputEnabled,
+			isRequestedInputEnabled: () => requestedInputEnabled,
 			isOutputEnabled: () => outputEnabled,
 			getPhase: () => phase,
 		};
@@ -69,9 +69,9 @@ describe("Talk integration service", () => {
 		expect("setOutputEnabled" in service!).toBe(false);
 
 		enabled = true;
-		inputEnabled = true;
+		requestedInputEnabled = true;
 		outputEnabled = true;
-		phase = "listening";
+		phase = "standby";
 		expect(service!.getActiveConversationInstructions()).toBe(TALK_SYSTEM_PROMPT);
 
 		let published: TalkStateSnapshot | undefined;
@@ -84,7 +84,7 @@ describe("Talk integration service", () => {
 			enabled: true,
 			inputEnabled: true,
 			outputEnabled: true,
-			phase: "listening",
+			phase: "standby",
 		});
 
 		integration.dispose();
