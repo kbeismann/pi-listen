@@ -23,14 +23,9 @@ export interface VoiceOnboardingState {
 
 export type VoiceBackend = "deepgram" | "local";
 
-export type TalkThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type TalkBargeInMode = "off" | "headphones" | "pipewire-aec";
 
 export interface ContinuousTalkConfig {
-	/** Text model selected only while /talk is active. Omit both fields to keep the current model. */
-	modelProvider?: string;
-	modelId?: string;
-	thinkingLevel: TalkThinkingLevel;
 	/** Local speech models used by the hands-free conversation loop. */
 	sttModel: string;
 	ttsModel: string;
@@ -170,9 +165,6 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	ttsDeepgramStreaming: false,
 	ttsOnboardingShown: false,
 	talk: {
-		modelProvider: undefined,
-		modelId: undefined,
-		thinkingLevel: "low",
 		sttModel: "parakeet-v3",
 		ttsModel: "kokoro-en-v0_19",
 		ttsVoiceId: 0,
@@ -226,7 +218,6 @@ function normalizeOnboarding(input: any, fallbackCompleted: boolean): VoiceOnboa
 	};
 }
 
-const TALK_THINKING_LEVELS = new Set<TalkThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const TALK_BARGE_IN_MODES = new Set<TalkBargeInMode>(["off", "headphones", "pipewire-aec"]);
 
 function finiteInRange(value: unknown, fallback: number, min: number, max: number): number {
@@ -240,15 +231,6 @@ function normalizeTalkConfig(input: any): ContinuousTalkConfig {
 	const rawBargeIn = input?.bargeIn;
 	const rawVad = input?.vad;
 	return {
-		modelProvider: typeof input?.modelProvider === "string" && input.modelProvider.trim()
-			? input.modelProvider.trim()
-			: undefined,
-		modelId: typeof input?.modelId === "string" && input.modelId.trim()
-			? input.modelId.trim()
-			: undefined,
-		thinkingLevel: TALK_THINKING_LEVELS.has(input?.thinkingLevel)
-			? input.thinkingLevel
-			: defaults.thinkingLevel,
 		sttModel: typeof input?.sttModel === "string" && input.sttModel.trim()
 			? input.sttModel.trim()
 			: defaults.sttModel,

@@ -160,7 +160,7 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 | `/voice history` | Recent transcriptions |
 | `/voice` | Toggle on/off |
 | `/talk on` / `off` | Start or stop hands-free local conversation |
-| `/talk status` | Show the active speech models, text model, and endpoint timing |
+| `/talk status` | Show the active speech models and endpoint timing |
 | `/talk input on` / `off` / `toggle` | Control continuous microphone capture without leaving Talk mode |
 | `/talk output on` / `off` / `toggle` | Control spoken responses without leaving Talk mode |
 
@@ -168,30 +168,26 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 `/talk on` starts an automatic conversation loop. Speak normally; inexpensive energy detection buffers and endpoints the audio, while a local Silero neural VAD must validate actual speech before Parakeet can transcribe it. Pi answers, and the configured local TTS model speaks the answer. The speech models download automatically with no metered API. The microphone listens while Pi is thinking and between turns, so no key is held or pressed. `/talk off` immediately stops capture and playback.
 
-While Talk mode is active, hold-`SPACE` dictation is inactive in that Pi session and `SPACE` remains an ordinary editor key. Trusted integrations can give foreground dictation in another Pi session temporary microphone priority; Talk keeps its model profile while capture is suspended, then resumes only if its input gate remains enabled.
+While Talk mode is active, hold-`SPACE` dictation is inactive in that Pi session and `SPACE` remains an ordinary editor key. Foreground dictation can temporarily take microphone priority; Talk resumes capture only if its input gate remains enabled.
 
-Trusted integrations may start Talk mode with input and output independently disabled. The input and output commands then enable either channel without changing the selected model, session permissions, or the other channel. Input remains continuous until disabled; it is a toggle rather than push-to-talk.
+Trusted integrations may start Talk mode with input and output independently disabled. The input and output commands then enable either channel without changing Pi's active model, session permissions, or the other channel. Input remains continuous until disabled; it is a toggle rather than push-to-talk.
 
 Talk mode defaults to speaker-safe playback. It closes microphone capture before TTS playback, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback. Continuous speech cancels playback after `bargeIn.minSpeechMs`; it never aborts the current model run or tool work. Shorter playback-time utterances are ignored rather than submitted as steering. The completed utterance is transcribed after the user stops speaking and queued as steering for Pi's next safe agent boundary. While the model is only thinking, `/talk` first finishes and transcribes the utterance locally; empty captures and brief backchannels such as “mm-hmm” leave the response running. On Linux, `pipewire-aec` instead creates a temporary WebRTC echo-cancellation source and sink for `/talk`, allowing the same interruption behavior over speakers. If the route cannot be created, talk mode reports the failure and falls back to speaker-safe playback. Microphone audio never leaves the machine; only the resulting text is sent to the configured Pi model.
 
 The mode is isolated from ordinary Pi turns:
 
-- Its conversational system prompt defaults to roughly three or four spoken sentences without headings, lists, tables, Markdown, or code-heavy text. The default is soft: explicit requests for detail and answers that genuinely require more context can run longer.
+- Its conversational system prompt defaults to roughly three or four spoken sentences without headings, lists, tables, or code-heavy text. The default is soft: explicit requests for detail and answers that genuinely require more context can run longer.
 - When a response is interrupted, later turns see only the completed spoken prefix plus an interruption marker, not generated text the user never heard.
 - It leaves active tools and permission enforcement to the surrounding Pi session; Talk neither grants nor removes authority.
-- It can temporarily select a dedicated text model and thinking level.
-- `/talk off` restores the exact previous model and thinking level.
+- It uses Pi's active model and thinking level unchanged.
 - Ordinary TTS remains controlled separately by `ttsEnabled`; talk speech does not enable it globally.
 
-The defaults use `parakeet-v3`, `kokoro-en-v0_19`, and low thinking. Set a dedicated text model under `voice.talk`:
+The defaults use `parakeet-v3` and `kokoro-en-v0_19`. Configure Talk's local speech models under `voice.talk`:
 
 ```json
 {
   "voice": {
     "talk": {
-      "modelProvider": "openai-codex",
-      "modelId": "gpt-5.6-terra",
-      "thinkingLevel": "low",
       "sttModel": "parakeet-v3",
       "ttsModel": "kokoro-en-v0_19",
       "ttsVoiceId": 0,

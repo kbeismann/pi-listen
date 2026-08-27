@@ -104,10 +104,6 @@ The user is having a spoken conversation with you. Talk changes how the user int
 
 Your response is converted to speech. Write for listening rather than visual scanning. Use short, natural sentences in the user's language. Do not use headings, bullet lists, tables, Markdown, emoji, code blocks, raw URLs, file paths, or symbol-heavy identifiers. Describe those items conversationally instead. By default, aim for about three or four sentences so the response feels like a natural spoken turn. This is not a hard limit: use more sentences whenever correctness, safety, or a complete useful answer requires them. If the user explicitly asks for a longer, detailed, or step-by-step answer, honor that request without applying the short-response default. Do not add confidence scores, report footers, sign-offs, or other written-document conventions.`;
 
-function modelKey(model: any): string {
-	return model ? `${model.provider ?? ""}/${model.id ?? ""}` : "";
-}
-
 function notify(ctx: TalkContext | undefined, message: string, level: "info" | "warning" | "error" = "info"): void {
 	if (ctx?.hasUI && ctx.ui?.notify) ctx.ui.notify(message, level);
 }
@@ -151,10 +147,6 @@ function lastClauseEnd(text: string): number {
 		lastEnd = match.index + match[0].length;
 	}
 	return lastEnd;
-}
-
-function isValidTalkModel(config: ContinuousTalkConfig): boolean {
-	return Boolean(config.modelProvider) === Boolean(config.modelId);
 }
 
 function isSubstantiveInterruption(text: string): boolean {
@@ -252,10 +244,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		speechTimingAbort: undefined as AbortController | undefined,
 		messageStreams: new Map<string, MessageStreamState>(),
 		interruptedMessages: new Map<string, string>(),
-		previousModel: undefined as any,
-		previousThinkingLevel: undefined as string | undefined,
-		targetModel: undefined as any,
-		snapshotTaken: false,
 	};
 
 	function setPhase(phase: TalkPhase, ctx?: TalkContext): void {
@@ -476,15 +464,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 	}
 
-	function applyTalkSettings(ctx?: TalkContext): void {
-		if (!state.enabled) return;
-		const config = talkConfig();
-		if (typeof (pi as any).setThinkingLevel === "function") {
-			(pi as any).setThinkingLevel(config.thinkingLevel);
-		}
-		if (ctx) setPhase(state.phase, ctx);
-	}
-
 	function stopCapture(signal: NodeJS.Signals = "SIGKILL"): void {
 		const capture = state.capture;
 		if (!capture) {
@@ -698,58 +677,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 	}
 
-	async function switchToTalkModel(ctx: TalkContext, config: ContinuousTalkConfig): Promise<void> {
-		if (!isValidTalkModel(config)) {
-			throw new Error("Talk modelProvider and modelId must either both be set or both be omitted.");
-		}
-
-		state.previousModel = (ctx as any).model;
-		state.previousThinkingLevel = typeof (pi as any).getThinkingLevel === "function"
-			? (pi as any).getThinkingLevel()
-			: undefined;
-		state.snapshotTaken = true;
-
-		if (!config.modelProvider || !config.modelId) return;
-		const target = (ctx as any).modelRegistry?.find(config.modelProvider, config.modelId);
-		if (!target) throw new Error(`Talk model ${config.modelProvider}/${config.modelId} is not registered.`);
-		state.targetModel = target;
-		if (modelKey(target) === modelKey(state.previousModel)) return;
-		const changed = await (pi as any).setModel(target);
-		if (!changed) throw new Error(`Talk model ${config.modelProvider}/${config.modelId} is unavailable or missing credentials.`);
-	}
-
-	async function restorePiState(ctx?: TalkContext): Promise<boolean> {
-		if (!state.snapshotTaken) return true;
-		const previousModel = state.previousModel;
-		const previousThinkingLevel = state.previousThinkingLevel;
-		let modelRestored = true;
-
-		if (previousModel && typeof (pi as any).setModel === "function") {
-			try {
-				const currentModel = (ctx as any)?.model;
-				if (modelKey(currentModel) !== modelKey(previousModel)) {
-					const restored = await (pi as any).setModel(previousModel);
-					if (!restored) {
-						modelRestored = false;
-						notify(ctx, `Could not restore model ${modelKey(previousModel)}.`, "warning");
-					}
-				}
-			} catch (error) {
-				modelRestored = false;
-				notify(ctx, `Could not restore the previous model: ${error instanceof Error ? error.message : String(error)}`, "warning");
-			}
-		}
-		if (previousThinkingLevel !== undefined && typeof (pi as any).setThinkingLevel === "function") {
-			(pi as any).setThinkingLevel(previousThinkingLevel);
-		}
-		if (modelRestored) {
-			state.snapshotTaken = false;
-			state.previousModel = undefined;
-			state.previousThinkingLevel = undefined;
-		}
-		return modelRestored;
-	}
-
 	function setInputEnabled(
 		enabled: boolean,
 		ctx: TalkContext | undefined = state.ctx,
@@ -852,11 +779,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			notify(ctx, "Waiting for the current agent turn before starting talk mode.");
 			await (ctx as any).waitForIdle?.();
 		}
-		if (state.snapshotTaken && !await restorePiState(ctx)) {
-			notify(ctx, "Talk mode cannot restart until the previous model is restored.", "error");
-			return false;
-		}
-
 		const epoch = ++state.lifecycleEpoch;
 		state.config = structuredClone(dependencies.getConfig());
 		state.inputEnabled = options.inputEnabled ?? true;
@@ -865,9 +787,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		setPhase("starting", ctx);
 
 		try {
-			if (!isValidTalkModel(state.config.talk)) {
-				throw new Error("Talk modelProvider and modelId must either both be set or both be omitted.");
-			}
 			if (state.transcription) await state.transcription;
 			if (state.lifecycleEpoch !== epoch || state.prepareAbort.signal.aborted) throw makeAbortError();
 			await dependencies.prepare(state.config, state.prepareAbort.signal);
@@ -895,10 +814,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 					);
 				}
 			}
-			await switchToTalkModel(ctx, state.config.talk);
 			if (state.lifecycleEpoch !== epoch) throw makeAbortError();
 			state.enabled = true;
-			applyTalkSettings(ctx);
 			if (state.inputEnabled) {
 				if (!startCapture(ctx, { stopModeOnFailure: false })) throw new Error("Could not start microphone capture.");
 			} else {
@@ -907,7 +824,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			if (options.notify !== false) {
 				notify(
 					ctx,
-					`Talk mode on. Input ${state.inputEnabled ? "on" : "off"}, output ${state.outputEnabled ? "on" : "off"}, ${state.config.talk.thinkingLevel} thinking.`,
+					`Talk mode on. Input ${state.inputEnabled ? "on" : "off"}, output ${state.outputEnabled ? "on" : "off"}.`,
 				);
 			}
 			return true;
@@ -918,8 +835,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			stopCapture("SIGKILL");
 			state.speechDetector = undefined;
 			await closeAudioRoute(ctx);
-			await restorePiState(ctx);
-			state.targetModel = undefined;
 			setPhase("off", ctx);
 			if ((error as Error)?.name !== "AbortError") {
 				notify(ctx, `Could not start talk mode: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -935,9 +850,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		options: { notify?: boolean; awaitTranscription?: boolean } = {},
 	): Promise<boolean> {
 		const wasActive = state.enabled || state.phase === "starting" || state.phase === "error";
-		const hadPendingRestore = state.snapshotTaken;
 		const hadAudioRoute = state.audioRoute !== undefined;
-		if (!wasActive && !hadPendingRestore && !hadAudioRoute && state.phase === "off" && !(options.awaitTranscription && state.transcription)) {
+		if (!wasActive && !hadAudioRoute && state.phase === "off" && !(options.awaitTranscription && state.transcription)) {
 			if (options.notify !== false) notify(ctx, "Talk mode is already off.");
 			return false;
 		}
@@ -964,22 +878,17 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 		if (typeof (ctx as any)?.isIdle === "function" && !(ctx as any).isIdle()) {
 			// Capture and TTS are already stopped above. Let the active model turn
-			// reach its normal boundary before restoring the previous model and
-			// thinking; leaving talk mode must not cancel reasoning or tool work.
+			// reach its normal boundary; leaving talk mode must not cancel reasoning
+			// or tool work.
 			try { await (ctx as any).waitForIdle?.(); } catch {}
 		}
 		await closeAudioRoute(ctx);
 		state.currentRun = undefined;
 		state.generalSpeechSuppressed = false;
-		const restored = await restorePiState(ctx);
-		state.targetModel = undefined;
 		state.config = undefined;
 		setPhase("off", ctx);
 		if (options.notify !== false) {
-			if (!wasActive && restored && hadPendingRestore) notify(ctx, "Previous model restored.");
-			else if (!wasActive) notify(ctx, "Talk mode is already off.");
-			else if (restored) notify(ctx, "Talk mode off. Previous model and thinking restored.");
-			else notify(ctx, "Talk mode is off, but the previous model could not be restored. Run /talk off to retry.", "warning");
+			notify(ctx, wasActive ? "Talk mode off." : "Talk mode is already off.");
 		}
 		return wasActive;
 	}
@@ -997,15 +906,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.messageStreams.clear();
 		if (!talkScoped) return undefined;
 		cancelSpeechQueue();
-		if (state.targetModel && modelKey((ctx as any).model) !== modelKey(state.targetModel)) {
-			try {
-				const changed = await (pi as any).setModel(state.targetModel);
-				if (!changed) notify(ctx, `Talk model ${modelKey(state.targetModel)} is unavailable; keeping the current model for this spoken turn.`, "warning");
-			} catch (error) {
-				notify(ctx, `Could not select talk model ${modelKey(state.targetModel)}: ${error instanceof Error ? error.message : String(error)}. Keeping the current model for this spoken turn.`, "warning");
-			}
-		}
-		applyTalkSettings(ctx);
 		setPhase("thinking", ctx);
 		startCapture(ctx);
 		return `${systemPrompt}\n\n${TALK_SYSTEM_PROMPT}`;
@@ -1031,7 +931,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			state.messageStreams.clear();
 			cancelSpeechQueue();
 		}
-		applyTalkSettings(ctx);
 		setPhase("thinking", ctx);
 		startCapture(ctx);
 	}
@@ -1256,7 +1155,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (!state.enabled) return;
 		state.ctx = ctx;
 		stopCapture();
-		applyTalkSettings(ctx);
 		setPhase("thinking", ctx);
 	}
 
@@ -1272,8 +1170,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			`STT: local ${config.sttModel}`,
 			"speech validation: local Silero VAD",
 			`TTS: local ${config.ttsModel}, voice ${config.ttsVoiceId}`,
-			`model: ${config.modelProvider && config.modelId ? `${config.modelProvider}/${config.modelId}` : "current"}`,
-			`thinking: ${config.thinkingLevel}`,
 			`barge-in: ${bargeInStatus}`,
 			`endpoint silence: ${config.vad.hangoverMs} ms`,
 		];

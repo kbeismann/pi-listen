@@ -45,7 +45,6 @@ describe("loadConfigWithSource", () => {
 		expect(result.config.scope).toBe("global");
 		expect(result.config.talk.sttModel).toBe("parakeet-v3");
 		expect(result.config.talk.ttsModel).toBe("kokoro-en-v0_19");
-		expect(result.config.talk.thinkingLevel).toBe("low");
 		expect(result.config.talk.bargeIn.mode).toBe("off");
 		expect(result.config.talk.bargeIn.minSpeechMs).toBe(250);
 		expect(result.config.talk.bargeIn.guardMs).toBe(500);
@@ -71,9 +70,9 @@ describe("loadConfigWithSource", () => {
 		});
 
 		const talk = loadConfigWithSource(cwd, { agentDir }).config.talk;
-		expect(talk.modelProvider).toBe("openai-codex");
-		expect(talk.modelId).toBe("gpt-5.6-terra");
-		expect(talk.thinkingLevel).toBe("low");
+		expect("modelProvider" in talk).toBe(false);
+		expect("modelId" in talk).toBe(false);
+		expect("thinkingLevel" in talk).toBe(false);
 		expect(talk.ttsVoiceId).toBe(0);
 		expect("allowedTools" in talk).toBe(false);
 		expect(talk.bargeIn.mode).toBe("pipewire-aec");
@@ -83,14 +82,15 @@ describe("loadConfigWithSource", () => {
 		expect(talk.vad.thresholdDb).toBe(-35);
 	});
 
-	test("accepts max thinking for a talk model that supports it", () => {
+	test("drops obsolete Talk reasoning settings", () => {
 		const cwd = makeTempDir();
 		const agentDir = path.join(cwd, "agent-home");
 		writeSettings(agentDir, "settings.json", {
 			talk: { thinkingLevel: "max" },
 		});
 
-		expect(loadConfigWithSource(cwd, { agentDir }).config.talk.thinkingLevel).toBe("max");
+		const talk = loadConfigWithSource(cwd, { agentDir }).config.talk;
+		expect("thinkingLevel" in talk).toBe(false);
 	});
 
 	test("migrates legacy global config and marks onboarding complete when backend and model were explicit", () => {
