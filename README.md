@@ -196,6 +196,11 @@ conversation input. Its default path is `$XDG_RUNTIME_DIR/pi-talk-voice.sock`
 that path. During foreground dictation, input responses report the latest
 requested state while capture remains preempted until the last lease releases.
 
+Start Pi with `--talk-muted` to initialize Talk during session startup with
+both input and output disabled. `/talk` remains the lifecycle command; an
+explicit `/talk off` prevents the startup flag from restarting Talk in later
+session or tree lifecycle callbacks in the same Pi process.
+
 The defaults use `parakeet-v3` and `kokoro-en-v0_19`. Configure Talk's local speech models under `voice.talk`:
 
 ```json

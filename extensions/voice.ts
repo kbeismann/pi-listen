@@ -94,6 +94,7 @@ import {
 import { createTalkMode, type TalkInputPreemptionLease } from "./voice/talk-mode";
 import { installTalkIntegration } from "./voice/talk-integration";
 import { acquireTalkInputPreemption } from "./voice/talk-input-preemption";
+import { createTalkMutedStartup } from "./voice/talk-startup";
 import { createTalkVoiceControlServer } from "./voice/talk-voice-control";
 import { createTalkSpeechOutput } from "./voice/talk-speech-output";
 import { createPipeWireEchoCancellation } from "./voice/pipewire-aec";
@@ -641,6 +642,14 @@ function abortSession(session: VoiceSession | null): void {
 // ─── Extension ───────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+	const mutedStartupState = ((globalThis as {
+		__piListenMutedStartupState?: { suppressed: boolean };
+	}).__piListenMutedStartupState ??= { suppressed: false });
+	pi.registerFlag("talk-muted", {
+		description: "Start Talk with microphone input and speech output disabled",
+		type: "boolean",
+		default: false,
+	});
 	let config = DEFAULT_CONFIG;
 	let configSource: VoiceSettingsScope | "default" = "default";
 	let currentCwd = process.cwd();
@@ -729,6 +738,7 @@ export default function (pi: ExtensionAPI) {
 
 	let dictationMode = false;
 	let talkMode: ReturnType<typeof createTalkMode> | null = null;
+	let talkMutedStartup: ReturnType<typeof createTalkMutedStartup> | null = null;
 
 	// ─── Sound Feedback ──────────────────────────────────────────────────────
 
@@ -2162,6 +2172,9 @@ export default function (pi: ExtensionAPI) {
 		const loaded = loadConfigWithSource(startCtx.cwd);
 		config = loaded.config;
 		configSource = loaded.source;
+		// The flag is registered while the extension loads, but local speech setup
+		// must wait until this session has loaded its Talk configuration.
+		await talkMutedStartup?.start(startCtx);
 
 		// v7.1.3 — version banner emitted to debug log on every session
 		// start. Lets users / support verify which extension build is
@@ -3374,11 +3387,19 @@ export default function (pi: ExtensionAPI) {
 	);
 	publishTalkState = talkIntegration.publishState;
 	talkMode = continuousTalk;
+	talkMutedStartup = createTalkMutedStartup(
+		() => pi.getFlag("talk-muted") === true,
+		continuousTalk,
+		mutedStartupState,
+	);
 	pi.on("session_shutdown", async () => {
 		talkIntegration.dispose();
 	});
 	pi.on("session_start", async (_event, eventCtx) => {
 		continuousTalk.restoreInterruptedContext(eventCtx);
+	});
+	pi.on("session_tree", async (_event, eventCtx) => {
+		await talkMutedStartup?.start(eventCtx);
 	});
 
 	pi.registerCommand("talk", {
@@ -3400,7 +3421,10 @@ export default function (pi: ExtensionAPI) {
 			ctx = cmdCtx;
 			const subcommand = (args || "").trim().toLowerCase();
 			if (!subcommand) {
-				if (continuousTalk.isEnabled()) await continuousTalk.disable(cmdCtx);
+				if (continuousTalk.isEnabled()) {
+					talkMutedStartup?.suppress();
+					await continuousTalk.disable(cmdCtx);
+				}
 				else {
 					if (voiceState !== "idle" || dictationMode) {
 						cmdCtx.ui.notify("Stop the current voice recording before starting talk mode.", "warning");
@@ -3421,6 +3445,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (subcommand === "off") {
+				talkMutedStartup?.suppress();
 				await continuousTalk.disable(cmdCtx);
 				return;
 			}
