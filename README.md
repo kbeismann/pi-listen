@@ -168,9 +168,9 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 `/talk on` starts an automatic conversation loop. Speak normally; inexpensive energy detection buffers and endpoints the audio, while a local Silero neural VAD must validate actual speech before Parakeet can transcribe it. Pi answers, and the configured local TTS model speaks the answer. The speech models download automatically with no metered API. The microphone listens while Pi is thinking and between turns, so no key is held or pressed. `/talk off` immediately stops capture and playback.
 
-While Talk mode is active, hold-`SPACE` dictation is inactive in that Pi session and `SPACE` remains an ordinary editor key. Trusted integrations can give foreground dictation in another Pi session temporary microphone priority; Talk keeps its model and tool profile while capture is suspended, then resumes only if its input gate remains enabled.
+While Talk mode is active, hold-`SPACE` dictation is inactive in that Pi session and `SPACE` remains an ordinary editor key. Trusted integrations can give foreground dictation in another Pi session temporary microphone priority; Talk keeps its model profile while capture is suspended, then resumes only if its input gate remains enabled.
 
-Trusted integrations may start Talk mode with input and output independently disabled. The input and output commands then enable either channel without changing the selected model, read-only tools, or the other channel. Input remains continuous until disabled; it is a toggle rather than push-to-talk.
+Trusted integrations may start Talk mode with input and output independently disabled. The input and output commands then enable either channel without changing the selected model, session permissions, or the other channel. Input remains continuous until disabled; it is a toggle rather than push-to-talk.
 
 Talk mode defaults to speaker-safe playback. It closes microphone capture before TTS playback, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback. Continuous speech cancels playback after `bargeIn.minSpeechMs`; it never aborts the current model run or tool work. Shorter playback-time utterances are ignored rather than submitted as steering. The completed utterance is transcribed after the user stops speaking and queued as steering for Pi's next safe agent boundary. While the model is only thinking, `/talk` first finishes and transcribes the utterance locally; empty captures and brief backchannels such as “mm-hmm” leave the response running. On Linux, `pipewire-aec` instead creates a temporary WebRTC echo-cancellation source and sink for `/talk`, allowing the same interruption behavior over speakers. If the route cannot be created, talk mode reports the failure and falls back to speaker-safe playback. Microphone audio never leaves the machine; only the resulting text is sent to the configured Pi model.
 
@@ -178,9 +178,9 @@ The mode is isolated from ordinary Pi turns:
 
 - Its conversational system prompt defaults to roughly three or four spoken sentences without headings, lists, tables, Markdown, or code-heavy text. The default is soft: explicit requests for detail and answers that genuinely require more context can run longer.
 - When a response is interrupted, later turns see only the completed spoken prefix plus an interruption marker, not generated text the user never heard.
-- It temporarily limits tools to a configured read-only allowlist.
+- It leaves active tools and permission enforcement to the surrounding Pi session; Talk neither grants nor removes authority.
 - It can temporarily select a dedicated text model and thinking level.
-- `/talk off` restores the exact previous model, thinking level, and active tools.
+- `/talk off` restores the exact previous model and thinking level.
 - Ordinary TTS remains controlled separately by `ttsEnabled`; talk speech does not enable it globally.
 
 The defaults use `parakeet-v3`, `kokoro-en-v0_19`, and low thinking. Set a dedicated text model under `voice.talk`:
@@ -195,7 +195,6 @@ The defaults use `parakeet-v3`, `kokoro-en-v0_19`, and low thinking. Set a dedic
       "sttModel": "parakeet-v3",
       "ttsModel": "kokoro-en-v0_19",
       "ttsVoiceId": 0,
-      "allowedTools": ["read", "grep", "find", "ls"],
       "bargeIn": {
         "mode": "off",
         "minSpeechMs": 250,

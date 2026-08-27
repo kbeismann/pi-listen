@@ -3306,9 +3306,8 @@ export default function (pi: ExtensionAPI) {
 	//
 	// /talk deliberately uses an audio path separate from hold-to-talk. It
 	// always selects the configured local STT and TTS models and restores the
-	// exact Pi state on exit. Optional PipeWire routing exists only for the
+	// previous model state on exit. Optional PipeWire routing exists only for the
 	// /talk lifecycle and is removed when the mode stops.
-	const talkSafeToolsByOwner = new Map<string, Set<string>>();
 	let publishTalkState = (): void => {};
 	const talkSpeechOutput = createTalkSpeechOutput();
 	const continuousTalk = createTalkMode(pi, {
@@ -3393,19 +3392,11 @@ export default function (pi: ExtensionAPI) {
 		finishSpeech: () => talkSpeechOutput.finish(),
 		cancelSpeech: () => talkSpeechOutput.cancel(),
 		onAudioChunk: updateAudioLevel,
-		getAdditionalAllowedTools: () => [
-			...new Set(
-				[...talkSafeToolsByOwner.values()].flatMap((toolNames) => [
-					...toolNames,
-				]),
-			),
-		],
 		onStateChange: () => publishTalkState(),
 	});
 	const talkIntegration = installTalkIntegration(
 		pi,
 		continuousTalk,
-		talkSafeToolsByOwner,
 	);
 	publishTalkState = talkIntegration.publishState;
 	talkMode = continuousTalk;
@@ -3519,9 +3510,6 @@ export default function (pi: ExtensionAPI) {
 	(pi as any).on("agent_settled", async () => {
 		await continuousTalk.handleAgentSettled();
 	});
-
-	pi.on("tool_call", async (event) => continuousTalk.handleToolCall(event));
-	pi.on("user_bash", async () => continuousTalk.handleUserBash());
 
 	pi.registerCommand("voice-speak", {
 		description: "Speak the given text (text-to-speech)",

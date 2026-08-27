@@ -25,7 +25,6 @@ export type VoiceBackend = "deepgram" | "local";
 
 export type TalkThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type TalkBargeInMode = "off" | "headphones" | "pipewire-aec";
-export const TALK_READ_ONLY_TOOLS = Object.freeze(["read", "grep", "find", "ls"]);
 
 export interface ContinuousTalkConfig {
 	/** Text model selected only while /talk is active. Omit both fields to keep the current model. */
@@ -36,8 +35,6 @@ export interface ContinuousTalkConfig {
 	sttModel: string;
 	ttsModel: string;
 	ttsVoiceId: number;
-	/** Read-only tools available while spoken input can trigger turns automatically. */
-	allowedTools: string[];
 	/** Optional headphone-safe interruption while the agent is answering. */
 	bargeIn: {
 		mode: TalkBargeInMode;
@@ -179,7 +176,6 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 		sttModel: "parakeet-v3",
 		ttsModel: "kokoro-en-v0_19",
 		ttsVoiceId: 0,
-		allowedTools: [...TALK_READ_ONLY_TOOLS],
 		bargeIn: {
 			mode: "off",
 			minSpeechMs: 250,
@@ -239,13 +235,6 @@ function finiteInRange(value: unknown, fallback: number, min: number, max: numbe
 		: fallback;
 }
 
-function normalizeToolNames(value: unknown, fallback: string[]): string[] {
-	if (!Array.isArray(value)) return [...fallback];
-	const names = value.filter((name): name is string => typeof name === "string" && name.trim().length > 0);
-	const safeNames = new Set(TALK_READ_ONLY_TOOLS);
-	return [...new Set(names.map((name) => name.trim()).filter((name) => safeNames.has(name)))];
-}
-
 function normalizeTalkConfig(input: any): ContinuousTalkConfig {
 	const defaults = DEFAULT_CONFIG.talk;
 	const rawBargeIn = input?.bargeIn;
@@ -267,7 +256,6 @@ function normalizeTalkConfig(input: any): ContinuousTalkConfig {
 			? input.ttsModel.trim()
 			: defaults.ttsModel,
 		ttsVoiceId: finiteInRange(input?.ttsVoiceId, defaults.ttsVoiceId, 0, 10_000),
-		allowedTools: normalizeToolNames(input?.allowedTools, defaults.allowedTools),
 		bargeIn: {
 			mode: TALK_BARGE_IN_MODES.has(rawBargeIn?.mode)
 				? rawBargeIn.mode

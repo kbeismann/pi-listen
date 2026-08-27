@@ -29,13 +29,17 @@ class MockPi {
 	sentMessages: Array<{ text: string; options: any }> = [];
 	entries: Array<{ type: "custom"; customType: string; data: unknown }> = [];
 	modelChanges: string[] = [];
+	activeToolChanges = 0;
 	registerTalkModel = true;
 	restoreFailures = 0;
 
 	getThinkingLevel(): string { return this.thinkingLevel; }
 	setThinkingLevel(level: string): void { this.thinkingLevel = level; }
 	getActiveTools(): string[] { return [...this.activeTools]; }
-	setActiveTools(tools: string[]): void { this.activeTools = [...tools]; }
+	setActiveTools(tools: string[]): void {
+		this.activeToolChanges += 1;
+		this.activeTools = [...tools];
+	}
 	getAllTools(): Array<{ name: string }> { return [...this.allTools]; }
 	async setModel(model: any): Promise<boolean> {
 		if (model === this.originalModel && this.restoreFailures > 0) {
@@ -187,10 +191,10 @@ describe("continuous talk mode", () => {
 		expect(TALK_SYSTEM_PROMPT).toContain("explicitly asks for a longer, detailed, or step-by-step answer");
 	});
 
-	test("distinguishes read-only inspection from blocked shell access", () => {
-		expect(TALK_SYSTEM_PROMPT).toContain("read and search local files and configuration");
-		expect(TALK_SYSTEM_PROMPT).toContain("additional bounded read-only inspectors");
-		expect(TALK_SYSTEM_PROMPT).toContain("Arbitrary shell commands remain unavailable");
+	test("keeps authority in the surrounding session instead of Talk", () => {
+		expect(TALK_SYSTEM_PROMPT).toContain("changes how the user interacts, not which actions are authorized");
+		expect(TALK_SYSTEM_PROMPT).toContain("existing instructions, active tools, and permission gates");
+		expect(TALK_SYSTEM_PROMPT).not.toContain("read-only");
 	});
 
 	test("renders Talk on one dedicated line without replacing Pi's footer", async () => {
@@ -312,14 +316,15 @@ describe("continuous talk mode", () => {
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
-	test("runs a local hands-free turn and restores the exact Pi state", async () => {
+	test("runs a local hands-free turn without changing tool permissions", async () => {
 		const { pi, captures, spoken, context, mode } = makeHarness();
 		const originalTools = [...pi.activeTools];
 
 		expect(await mode.enable(context as any)).toBe(true);
 		expect(pi.model).toBe(pi.talkModel);
 		expect(pi.thinkingLevel).toBe("low");
-		expect(pi.activeTools).toEqual(["read", "grep", "find", "ls"]);
+		expect(pi.activeTools).toEqual(originalTools);
+		expect(pi.activeToolChanges).toBe(0);
 		expect(mode.getPhase()).toBe("listening");
 		expect(captures).toHaveLength(1);
 
@@ -353,6 +358,7 @@ describe("continuous talk mode", () => {
 		expect(pi.model).toBe(pi.originalModel);
 		expect(pi.thinkingLevel).toBe("xhigh");
 		expect(pi.activeTools).toEqual(originalTools);
+		expect(pi.activeToolChanges).toBe(0);
 		expect(captures[2]!.killedWith).toBe("SIGKILL");
 		expect(mode.getPhase()).toBe("off");
 	});
@@ -384,31 +390,6 @@ describe("continuous talk mode", () => {
 		expect(harness.mode._state.messageStreams.get("id:answer")?.completedLength)
 			.toBe("First sentence. Trailing words.".length);
 		expect(harness.mode.getPhase()).toBe("listening");
-		await harness.mode.disable(harness.context as any, { notify: false });
-	});
-
-	test("allows exact read-only tools selected by a trusted integration", async () => {
-		const harness = makeHarness({
-			getAdditionalAllowedTools: () => ["pi_supervisor", "unknown_tool"],
-		});
-		harness.pi.allTools.push({ name: "pi_supervisor" });
-
-		expect(await harness.mode.enable(harness.context as any)).toBe(true);
-		expect(harness.pi.activeTools).toEqual([
-			"read",
-			"grep",
-			"find",
-			"ls",
-			"pi_supervisor",
-		]);
-		expect(
-			harness.mode.handleToolCall({ toolName: "pi_supervisor" }),
-		).toBeUndefined();
-		expect(harness.mode.handleToolCall({ toolName: "bash" })).toEqual({
-			block: true,
-			reason: "Talk mode is read-only; tool 'bash' is unavailable until /talk off.",
-		});
-
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 

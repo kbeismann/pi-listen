@@ -52,7 +52,7 @@ describe("loadConfigWithSource", () => {
 		expect(result.config.talk.vad.hangoverMs).toBe(500);
 	});
 
-	test("normalizes continuous talk settings without widening tool access", () => {
+	test("normalizes interaction settings and ignores obsolete tool policy", () => {
 		const cwd = makeTempDir();
 		const agentDir = path.join(cwd, "agent-home");
 		writeSettings(agentDir, "settings.json", {
@@ -75,7 +75,7 @@ describe("loadConfigWithSource", () => {
 		expect(talk.modelId).toBe("gpt-5.6-terra");
 		expect(talk.thinkingLevel).toBe("low");
 		expect(talk.ttsVoiceId).toBe(0);
-		expect(talk.allowedTools).toEqual(["read", "grep"]);
+		expect("allowedTools" in talk).toBe(false);
 		expect(talk.bargeIn.mode).toBe("pipewire-aec");
 		expect(talk.bargeIn.minSpeechMs).toBe(250);
 		expect(talk.bargeIn.guardMs).toBe(500);

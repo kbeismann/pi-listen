@@ -9,9 +9,15 @@ import type {
 	TalkPhase,
 } from "./talk-mode";
 
-export const TALK_SERVICE_CHANNEL = "pi-listen:talk-service:v2";
-export const TALK_STATE_CHANNEL = "pi-listen:talk-state:v2";
-export const TALK_SERVICE_PROTOCOL = "pi-listen.talk-service/v2";
+export const TALK_SERVICE_CHANNEL = "pi-listen:talk-service:v3";
+export const TALK_STATE_CHANNEL = "pi-listen:talk-state:v3";
+export const TALK_SERVICE_PROTOCOL = "pi-listen.talk-service/v3";
+/** @deprecated Compatibility channel for Relay producers that still speak v2. */
+export const TALK_SERVICE_CHANNEL_V2 = "pi-listen:talk-service:v2";
+/** @deprecated Compatibility channel for Relay consumers that still speak v2. */
+export const TALK_STATE_CHANNEL_V2 = "pi-listen:talk-state:v2";
+/** @deprecated Compatibility protocol for Relay producers that still speak v2. */
+export const TALK_SERVICE_PROTOCOL_V2 = "pi-listen.talk-service/v2";
 
 export type TalkIntegrationContext = ExtensionContext | ExtensionCommandContext;
 
@@ -23,9 +29,16 @@ export interface TalkStateSnapshot {
 	phase: TalkPhase;
 }
 
-export interface TalkIntegrationService {
-	protocol: typeof TALK_SERVICE_PROTOCOL;
-	getState(): TalkStateSnapshot;
+/** @deprecated Snapshot shape emitted on the v2 compatibility state channel. */
+export interface TalkStateSnapshotV2 {
+	protocol: typeof TALK_SERVICE_PROTOCOL_V2;
+	enabled: boolean;
+	inputEnabled: boolean;
+	outputEnabled: boolean;
+	phase: TalkPhase;
+}
+
+interface TalkIntegrationOperations {
 	enable(
 		ctx: TalkIntegrationContext,
 		options?: TalkEnableOptions,
@@ -44,6 +57,17 @@ export interface TalkIntegrationService {
 		ctx?: TalkIntegrationContext,
 		options?: TalkControlOptions,
 	): boolean;
+}
+
+export interface TalkIntegrationService extends TalkIntegrationOperations {
+	protocol: typeof TALK_SERVICE_PROTOCOL;
+	getState(): TalkStateSnapshot;
+}
+
+/** @deprecated v2 service shape retained for the producer-first rollout. */
+export interface TalkIntegrationServiceV2 extends TalkIntegrationOperations {
+	protocol: typeof TALK_SERVICE_PROTOCOL_V2;
+	getState(): TalkStateSnapshotV2;
 	setSafeTools(
 		owner: string,
 		toolNames: string[],
@@ -55,6 +79,11 @@ export interface TalkIntegrationService {
 export interface TalkServiceRequest {
 	protocol: typeof TALK_SERVICE_PROTOCOL;
 	accept(service: TalkIntegrationService): void;
+}
+
+export interface TalkServiceRequestV2 {
+	protocol: typeof TALK_SERVICE_PROTOCOL_V2;
+	accept(service: TalkIntegrationServiceV2): void;
 }
 
 interface TalkModeController {
@@ -76,35 +105,30 @@ interface TalkModeController {
 		ctx?: TalkIntegrationContext,
 		options?: TalkControlOptions,
 	): boolean;
-	applyConstraints(ctx?: TalkIntegrationContext): void;
 	isEnabled(): boolean;
 	isInputEnabled(): boolean;
 	isOutputEnabled(): boolean;
 	getPhase(): TalkPhase;
 }
 
-function validOwner(owner: string): boolean {
-	return /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(owner);
-}
-
-function validToolName(toolName: string): boolean {
-	return /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(toolName);
-}
-
 /**
- * Publish a narrow in-process service for trusted extensions that compose
- * `/talk`. Pi extensions already execute with the user's full permissions, so
- * the explicit owner and exact tool names provide lifecycle isolation rather
- * than a security boundary. Talk still rejects every tool that neither its
- * built-in allowlist nor a current integration owner has selected.
+ * Publish lifecycle and audio-channel controls for trusted extensions that
+ * compose `/talk`. Talk changes interaction only; callers retain responsibility
+ * for their own permissions and tool policy.
  */
 export function installTalkIntegration(
 	pi: ExtensionAPI,
 	talkMode: TalkModeController,
-	safeToolsByOwner: Map<string, Set<string>>,
 ): { publishState(): void; dispose(): void } {
 	const getState = (): TalkStateSnapshot => ({
 		protocol: TALK_SERVICE_PROTOCOL,
+		enabled: talkMode.isEnabled(),
+		inputEnabled: talkMode.isInputEnabled(),
+		outputEnabled: talkMode.isOutputEnabled(),
+		phase: talkMode.getPhase(),
+	});
+	const getV2State = (): TalkStateSnapshotV2 => ({
+		protocol: TALK_SERVICE_PROTOCOL_V2,
 		enabled: talkMode.isEnabled(),
 		inputEnabled: talkMode.isInputEnabled(),
 		outputEnabled: talkMode.isOutputEnabled(),
@@ -120,29 +144,28 @@ export function installTalkIntegration(
 			talkMode.setInputEnabled(enabled, ctx, options),
 		setOutputEnabled: (enabled, ctx, options) =>
 			talkMode.setOutputEnabled(enabled, ctx, options),
-		setSafeTools(owner, toolNames, ctx) {
-			if (!validOwner(owner)) throw new Error("Invalid talk integration owner.");
-			if (
-				!Array.isArray(toolNames)
-				|| toolNames.some((name) => typeof name !== "string")
-			) {
-				throw new Error("Invalid talk integration tool names.");
-			}
-			const normalized = [...new Set(toolNames.map((name) => name.trim()))];
-			if (normalized.some((name) => !validToolName(name))) {
-				throw new Error("Invalid talk integration tool name.");
-			}
-			safeToolsByOwner.set(owner, new Set(normalized));
-			if (talkMode.isEnabled()) talkMode.applyConstraints(ctx);
-		},
-		clearSafeTools(owner, ctx) {
-			if (!validOwner(owner)) throw new Error("Invalid talk integration owner.");
-			safeToolsByOwner.delete(owner);
-			if (talkMode.isEnabled()) talkMode.applyConstraints(ctx);
-		},
 	};
 
-	const unsubscribe = pi.events.on(TALK_SERVICE_CHANNEL, (data) => {
+	/**
+	 * Deprecated adapter for deployed Relay v2 producers. Lifecycle and audio
+	 * controls remain real forwards to Talk, while the removed permission
+	 * controls are intentional no-ops: v2 Relay retains its deterministic
+	 * permission guard and the surrounding Pi session owns permissions in v3.
+	 */
+	const compatibilityService: TalkIntegrationServiceV2 = {
+		protocol: TALK_SERVICE_PROTOCOL_V2,
+		getState: getV2State,
+		enable: (ctx, options) => talkMode.enable(ctx, options),
+		disable: (ctx, options) => talkMode.disable(ctx, options),
+		setInputEnabled: (enabled, ctx, options) =>
+			talkMode.setInputEnabled(enabled, ctx, options),
+		setOutputEnabled: (enabled, ctx, options) =>
+			talkMode.setOutputEnabled(enabled, ctx, options),
+		setSafeTools(_owner, _toolNames, _ctx) {},
+		clearSafeTools(_owner, _ctx) {},
+	};
+
+	const unsubscribeV3 = pi.events.on(TALK_SERVICE_CHANNEL, (data) => {
 		const request = data as Partial<TalkServiceRequest> | undefined;
 		if (
 			request?.protocol === TALK_SERVICE_PROTOCOL
@@ -151,11 +174,24 @@ export function installTalkIntegration(
 			request.accept(service);
 		}
 	});
+	const unsubscribeV2 = pi.events.on(TALK_SERVICE_CHANNEL_V2, (data) => {
+		const request = data as Partial<TalkServiceRequestV2> | undefined;
+		if (
+			request?.protocol === TALK_SERVICE_PROTOCOL_V2
+			&& typeof request.accept === "function"
+		) {
+			request.accept(compatibilityService);
+		}
+	});
 
 	return {
 		publishState() {
 			pi.events.emit(TALK_STATE_CHANNEL, getState());
+			pi.events.emit(TALK_STATE_CHANNEL_V2, getV2State());
 		},
-		dispose: unsubscribe,
+		dispose() {
+			unsubscribeV3();
+			unsubscribeV2();
+		},
 	};
 }

@@ -56,7 +56,6 @@ export interface TalkModeDependencies {
 	/** Cancel queued and active audio without affecting model generation. */
 	cancelSpeech?(): void;
 	onAudioChunk?(chunk: Buffer): void;
-	getAdditionalAllowedTools?(): string[];
 	onStateChange?(): void;
 }
 
@@ -101,9 +100,7 @@ const NON_INTERRUPTING_TALK_PHRASES = new Set([
 ]);
 
 export const TALK_SYSTEM_PROMPT = `[CONTINUOUS TALK MODE ACTIVE]
-The user is having a spoken conversation with you. This mode is read-only and nondestructive. Do not edit files, run shell commands, install software, publish, delete data, or cause external side effects. If write-capable work is needed, ask the user to leave talk mode first with /talk off.
-
-Use the active read-only tools whenever inspection helps. Talk mode may read and search local files and configuration that those tools can access, including paths outside the current project, and trusted integrations may provide additional bounded read-only inspectors. Do not claim that Talk mode itself prevents such inspection. Arbitrary shell commands remain unavailable.
+The user is having a spoken conversation with you. Talk changes how the user interacts, not which actions are authorized. Follow the session's existing instructions, active tools, and permission gates exactly; do not infer broader or narrower authority from Talk being active.
 
 Your response is converted to speech. Write for listening rather than visual scanning. Use short, natural sentences in the user's language. Do not use headings, bullet lists, tables, Markdown, emoji, code blocks, raw URLs, file paths, or symbol-heavy identifiers. Describe those items conversationally instead. By default, aim for about three or four sentences so the response feels like a natural spoken turn. This is not a hard limit: use more sentences whenever correctness, safety, or a complete useful answer requires them. If the user explicitly asks for a longer, detailed, or step-by-step answer, honor that request without applying the short-response default. Do not add confidence scores, report footers, sign-offs, or other written-document conventions.`;
 
@@ -186,7 +183,7 @@ function talkStateLabel(
  * replacing Pi's normal footer. Talk owns this persistent state presentation
  * so integrations do not have to duplicate it. The fixed true-color neon
  * magenta is deliberately independent of the active theme so Talk's microphone
- * ownership and read-only tool constraints are unmistakable at a glance.
+ * ownership is unmistakable at a glance.
  */
 function formatTalkStatus(
 	phase: Exclude<TalkPhase, "off">,
@@ -257,7 +254,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		interruptedMessages: new Map<string, string>(),
 		previousModel: undefined as any,
 		previousThinkingLevel: undefined as string | undefined,
-		previousActiveTools: undefined as string[] | undefined,
 		targetModel: undefined as any,
 		snapshotTaken: false,
 	};
@@ -480,25 +476,11 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		}
 	}
 
-	function effectiveAllowedTools(config: ContinuousTalkConfig): string[] {
-		const requested = [
-			...config.allowedTools,
-			...(dependencies.getAdditionalAllowedTools?.() ?? []),
-		];
-		const allTools = typeof (pi as any).getAllTools === "function" ? (pi as any).getAllTools() : undefined;
-		if (!Array.isArray(allTools) || allTools.length === 0) return [...requested];
-		const known = new Set(allTools.map((tool: any) => tool?.name).filter((name: unknown) => typeof name === "string"));
-		return requested.filter((name) => known.has(name));
-	}
-
-	function applyConstraints(ctx?: TalkContext): void {
+	function applyTalkSettings(ctx?: TalkContext): void {
 		if (!state.enabled) return;
 		const config = talkConfig();
 		if (typeof (pi as any).setThinkingLevel === "function") {
 			(pi as any).setThinkingLevel(config.thinkingLevel);
-		}
-		if (typeof (pi as any).setActiveTools === "function") {
-			(pi as any).setActiveTools(effectiveAllowedTools(config));
 		}
 		if (ctx) setPhase(state.phase, ctx);
 	}
@@ -725,9 +707,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.previousThinkingLevel = typeof (pi as any).getThinkingLevel === "function"
 			? (pi as any).getThinkingLevel()
 			: undefined;
-		state.previousActiveTools = typeof (pi as any).getActiveTools === "function"
-			? [...(pi as any).getActiveTools()]
-			: undefined;
 		state.snapshotTaken = true;
 
 		if (!config.modelProvider || !config.modelId) return;
@@ -743,7 +722,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (!state.snapshotTaken) return true;
 		const previousModel = state.previousModel;
 		const previousThinkingLevel = state.previousThinkingLevel;
-		const previousActiveTools = state.previousActiveTools;
 		let modelRestored = true;
 
 		if (previousModel && typeof (pi as any).setModel === "function") {
@@ -764,14 +742,10 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (previousThinkingLevel !== undefined && typeof (pi as any).setThinkingLevel === "function") {
 			(pi as any).setThinkingLevel(previousThinkingLevel);
 		}
-		if (previousActiveTools !== undefined && typeof (pi as any).setActiveTools === "function") {
-			(pi as any).setActiveTools(previousActiveTools);
-		}
 		if (modelRestored) {
 			state.snapshotTaken = false;
 			state.previousModel = undefined;
 			state.previousThinkingLevel = undefined;
-			state.previousActiveTools = undefined;
 		}
 		return modelRestored;
 	}
@@ -924,7 +898,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			await switchToTalkModel(ctx, state.config.talk);
 			if (state.lifecycleEpoch !== epoch) throw makeAbortError();
 			state.enabled = true;
-			applyConstraints(ctx);
+			applyTalkSettings(ctx);
 			if (state.inputEnabled) {
 				if (!startCapture(ctx, { stopModeOnFailure: false })) throw new Error("Could not start microphone capture.");
 			} else {
@@ -991,7 +965,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (typeof (ctx as any)?.isIdle === "function" && !(ctx as any).isIdle()) {
 			// Capture and TTS are already stopped above. Let the active model turn
 			// reach its normal boundary before restoring the previous model and
-			// tools; leaving talk mode must not cancel reasoning or tool work.
+			// thinking; leaving talk mode must not cancel reasoning or tool work.
 			try { await (ctx as any).waitForIdle?.(); } catch {}
 		}
 		await closeAudioRoute(ctx);
@@ -1004,7 +978,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (options.notify !== false) {
 			if (!wasActive && restored && hadPendingRestore) notify(ctx, "Previous model restored.");
 			else if (!wasActive) notify(ctx, "Talk mode is already off.");
-			else if (restored) notify(ctx, "Talk mode off. Previous model, thinking, and tools restored.");
+			else if (restored) notify(ctx, "Talk mode off. Previous model and thinking restored.");
 			else notify(ctx, "Talk mode is off, but the previous model could not be restored. Run /talk off to retry.", "warning");
 		}
 		return wasActive;
@@ -1026,12 +1000,12 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (state.targetModel && modelKey((ctx as any).model) !== modelKey(state.targetModel)) {
 			try {
 				const changed = await (pi as any).setModel(state.targetModel);
-				if (!changed) notify(ctx, `Talk model ${modelKey(state.targetModel)} is unavailable; keeping the current model for this read-only turn.`, "warning");
+				if (!changed) notify(ctx, `Talk model ${modelKey(state.targetModel)} is unavailable; keeping the current model for this spoken turn.`, "warning");
 			} catch (error) {
-				notify(ctx, `Could not select talk model ${modelKey(state.targetModel)}: ${error instanceof Error ? error.message : String(error)}. Keeping the current model for this read-only turn.`, "warning");
+				notify(ctx, `Could not select talk model ${modelKey(state.targetModel)}: ${error instanceof Error ? error.message : String(error)}. Keeping the current model for this spoken turn.`, "warning");
 			}
 		}
-		applyConstraints(ctx);
+		applyTalkSettings(ctx);
 		setPhase("thinking", ctx);
 		startCapture(ctx);
 		return `${systemPrompt}\n\n${TALK_SYSTEM_PROMPT}`;
@@ -1057,7 +1031,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			state.messageStreams.clear();
 			cancelSpeechQueue();
 		}
-		applyConstraints(ctx);
+		applyTalkSettings(ctx);
 		setPhase("thinking", ctx);
 		startCapture(ctx);
 	}
@@ -1282,31 +1256,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (!state.enabled) return;
 		state.ctx = ctx;
 		stopCapture();
-		applyConstraints(ctx);
+		applyTalkSettings(ctx);
 		setPhase("thinking", ctx);
-	}
-
-	function handleToolCall(event: any): { block: true; reason: string } | undefined {
-		if (!state.enabled) return undefined;
-		const allowed = new Set(effectiveAllowedTools(talkConfig()));
-		const toolName = typeof event?.toolName === "string" ? event.toolName : "unknown";
-		if (allowed.has(toolName)) return undefined;
-		return {
-			block: true,
-			reason: `Talk mode is read-only; tool '${toolName}' is unavailable until /talk off.`,
-		};
-	}
-
-	function handleUserBash(): any {
-		if (!state.enabled) return undefined;
-		return {
-			result: {
-				output: "Talk mode blocks shell commands. Use /talk off first.",
-				exitCode: 126,
-				cancelled: false,
-				truncated: false,
-			},
-		};
 	}
 
 	function statusLines(): string[] {
@@ -1342,9 +1293,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		restoreInterruptedContext,
 		handleAgentSettled,
 		handleInput,
-		handleToolCall,
-		handleUserBash,
-		applyConstraints,
 		ownsCurrentRun,
 		suppressesGeneralSpeech: () => state.generalSpeechSuppressed,
 		isEnabled: () => state.enabled,

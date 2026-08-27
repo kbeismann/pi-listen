@@ -2,10 +2,15 @@ import { describe, expect, test } from "bun:test";
 import {
 	installTalkIntegration,
 	TALK_SERVICE_CHANNEL,
+	TALK_SERVICE_CHANNEL_V2,
 	TALK_SERVICE_PROTOCOL,
+	TALK_SERVICE_PROTOCOL_V2,
 	TALK_STATE_CHANNEL,
+	TALK_STATE_CHANNEL_V2,
 	type TalkIntegrationService,
+	type TalkIntegrationServiceV2,
 	type TalkStateSnapshot,
+	type TalkStateSnapshotV2,
 } from "../extensions/voice/talk-integration";
 import type { TalkPhase } from "../extensions/voice/talk-mode";
 
@@ -32,14 +37,12 @@ class FakeEventBus {
 }
 
 describe("talk integration service", () => {
-	test("coordinates lifecycle, safe tools, and state through Pi's event bus", async () => {
+	test("coordinates v3 and v2 interaction services through Pi's event bus", async () => {
 		const events = new FakeEventBus();
-		const safeToolsByOwner = new Map<string, Set<string>>();
 		let enabled = false;
 		let inputEnabled = false;
 		let outputEnabled = false;
 		let phase: TalkPhase = "off";
-		let constraintsApplied = 0;
 		const mode = {
 			async enable(_ctx: unknown, options: { inputEnabled?: boolean; outputEnabled?: boolean } = {}): Promise<boolean> {
 				enabled = true;
@@ -64,19 +67,12 @@ describe("talk integration service", () => {
 				outputEnabled = value;
 				return true;
 			},
-			applyConstraints(): void {
-				constraintsApplied += 1;
-			},
 			isEnabled: () => enabled,
 			isInputEnabled: () => inputEnabled,
 			isOutputEnabled: () => outputEnabled,
 			getPhase: () => phase,
 		};
-		const integration = installTalkIntegration(
-			{ events } as any,
-			mode,
-			safeToolsByOwner,
-		);
+		const integration = installTalkIntegration({ events } as any, mode);
 
 		let service: TalkIntegrationService | undefined;
 		events.emit(TALK_SERVICE_CHANNEL, {
@@ -86,6 +82,8 @@ describe("talk integration service", () => {
 			},
 		});
 		expect(service).toBeDefined();
+		expect("setSafeTools" in service!).toBe(false);
+		expect("clearSafeTools" in service!).toBe(false);
 		expect(service!.getState()).toEqual({
 			protocol: TALK_SERVICE_PROTOCOL,
 			enabled: false,
@@ -94,25 +92,56 @@ describe("talk integration service", () => {
 			phase: "off",
 		});
 
-		service!.setSafeTools("pi-relay", ["pi_supervisor", "pi_supervisor"]);
-		expect([...safeToolsByOwner.get("pi-relay")!]).toEqual(["pi_supervisor"]);
-		expect(constraintsApplied).toBe(0);
+		let compatibilityService: TalkIntegrationServiceV2 | undefined;
+		events.emit(TALK_SERVICE_CHANNEL_V2, {
+			protocol: TALK_SERVICE_PROTOCOL_V2,
+			accept(candidate: TalkIntegrationServiceV2) {
+				compatibilityService = candidate;
+			},
+		});
+		expect(compatibilityService).toBeDefined();
+		expect(compatibilityService!.protocol).toBe(TALK_SERVICE_PROTOCOL_V2);
+		expect(compatibilityService!.getState()).toEqual({
+			protocol: TALK_SERVICE_PROTOCOL_V2,
+			enabled: false,
+			inputEnabled: false,
+			outputEnabled: false,
+			phase: "off",
+		});
 
-		expect(await service!.enable({} as any, {
+		expect(() => compatibilityService!.setSafeTools(
+			"pi-relay",
+			["pi_supervisor"],
+			{} as any,
+		)).not.toThrow();
+		expect(() => compatibilityService!.clearSafeTools(
+			"pi-relay",
+			{} as any,
+		)).not.toThrow();
+		expect(service!.getState()).toEqual({
+			protocol: TALK_SERVICE_PROTOCOL,
+			enabled: false,
+			inputEnabled: false,
+			outputEnabled: false,
+			phase: "off",
+		});
+
+		expect(await compatibilityService!.enable({} as any, {
 			inputEnabled: false,
 			outputEnabled: false,
 		})).toBe(true);
-		expect(service!.setInputEnabled(true)).toBe(true);
-		expect(service!.setOutputEnabled(true)).toBe(true);
-		service!.setSafeTools("pi-relay", ["pi_supervisor"]);
-		expect(constraintsApplied).toBe(1);
-
-		let published: TalkStateSnapshot | undefined;
-		events.on(TALK_STATE_CHANNEL, (data) => {
-			published = data as TalkStateSnapshot;
+		expect(compatibilityService!.setInputEnabled(true)).toBe(true);
+		expect(compatibilityService!.setOutputEnabled(true)).toBe(true);
+		expect(service!.getState()).toEqual({
+			protocol: TALK_SERVICE_PROTOCOL,
+			enabled: true,
+			inputEnabled: true,
+			outputEnabled: true,
+			phase: "listening",
 		});
-		integration.publishState();
-		expect(published).toEqual({
+		expect(() => compatibilityService!.setSafeTools("pi-relay", [])).not.toThrow();
+		expect(() => compatibilityService!.clearSafeTools("pi-relay")).not.toThrow();
+		expect(service!.getState()).toEqual({
 			protocol: TALK_SERVICE_PROTOCOL,
 			enabled: true,
 			inputEnabled: true,
@@ -120,50 +149,48 @@ describe("talk integration service", () => {
 			phase: "listening",
 		});
 
-		service!.clearSafeTools("pi-relay");
-		expect(safeToolsByOwner.has("pi-relay")).toBe(false);
-		expect(constraintsApplied).toBe(2);
-		expect(await service!.disable()).toBe(true);
+		let publishedV3: TalkStateSnapshot | undefined;
+		events.on(TALK_STATE_CHANNEL, (data) => {
+			publishedV3 = data as TalkStateSnapshot;
+		});
+		let publishedV2: TalkStateSnapshotV2 | undefined;
+		events.on(TALK_STATE_CHANNEL_V2, (data) => {
+			publishedV2 = data as TalkStateSnapshotV2;
+		});
+		integration.publishState();
+		expect(publishedV3).toEqual({
+			protocol: TALK_SERVICE_PROTOCOL,
+			enabled: true,
+			inputEnabled: true,
+			outputEnabled: true,
+			phase: "listening",
+		});
+		expect(publishedV2).toEqual({
+			protocol: TALK_SERVICE_PROTOCOL_V2,
+			enabled: true,
+			inputEnabled: true,
+			outputEnabled: true,
+			phase: "listening",
+		});
+
+		expect(await compatibilityService!.disable()).toBe(true);
 
 		integration.dispose();
-		let rediscovered = false;
+		let rediscoveredV3 = false;
 		events.emit(TALK_SERVICE_CHANNEL, {
 			protocol: TALK_SERVICE_PROTOCOL,
 			accept() {
-				rediscovered = true;
+				rediscoveredV3 = true;
 			},
 		});
-		expect(rediscovered).toBe(false);
-	});
-
-	test("rejects malformed integration ownership and tool names", () => {
-		const events = new FakeEventBus();
-		const integrationTools = new Map<string, Set<string>>();
-		installTalkIntegration(
-			{ events } as any,
-			{
-				enable: async () => true,
-				disable: async () => true,
-				setInputEnabled: () => true,
-				setOutputEnabled: () => true,
-				applyConstraints() {},
-				isEnabled: () => false,
-				isInputEnabled: () => false,
-				isOutputEnabled: () => false,
-				getPhase: () => "off",
-			},
-			integrationTools,
-		);
-		let service: TalkIntegrationService | undefined;
-		events.emit(TALK_SERVICE_CHANNEL, {
-			protocol: TALK_SERVICE_PROTOCOL,
-			accept(candidate: TalkIntegrationService) {
-				service = candidate;
+		let rediscoveredV2 = false;
+		events.emit(TALK_SERVICE_CHANNEL_V2, {
+			protocol: TALK_SERVICE_PROTOCOL_V2,
+			accept() {
+				rediscoveredV2 = true;
 			},
 		});
-
-		expect(() => service!.setSafeTools("", ["pi_supervisor"])).toThrow();
-		expect(() => service!.setSafeTools("pi-relay", [42] as any)).toThrow();
-		expect(() => service!.setSafeTools("pi-relay", ["../bash"])).toThrow();
+		expect(rediscoveredV3).toBe(false);
+		expect(rediscoveredV2).toBe(false);
 	});
 });
