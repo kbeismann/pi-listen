@@ -177,6 +177,11 @@ describe("continuous talk mode", () => {
 		expect(TALK_SYSTEM_PROMPT).toContain("explicitly asks for a longer, detailed, or step-by-step answer");
 	});
 
+	test("allows short inline Markdown links required by another active layer", () => {
+		expect(TALK_SYSTEM_PROMPT).toContain("short inline links another active layer requires");
+		expect(TALK_SYSTEM_PROMPT).toContain("converts those links to natural labels");
+	});
+
 	test("keeps authority in the surrounding session instead of Talk", () => {
 		expect(TALK_SYSTEM_PROMPT).toContain("changes how the user interacts, not which actions are authorized");
 		expect(TALK_SYSTEM_PROMPT).toContain("existing instructions, active tools, and permission gates");
@@ -324,7 +329,7 @@ describe("continuous talk mode", () => {
 		]);
 
 		const systemPrompt = await mode.beginAgentRun("base prompt", context as any);
-		expect(systemPrompt).toContain(TALK_SYSTEM_PROMPT);
+		expect(systemPrompt).toBe(`base prompt\n\n${TALK_SYSTEM_PROMPT}`);
 		expect(pi.model).toBe(pi.originalModel);
 		expect(pi.thinkingLevel).toBe("xhigh");
 		expect(pi.modelChanges).toEqual([]);

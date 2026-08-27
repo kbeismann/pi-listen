@@ -2,17 +2,12 @@ import { describe, expect, test } from "bun:test";
 import {
 	installTalkIntegration,
 	TALK_SERVICE_CHANNEL,
-	TALK_SERVICE_CHANNEL_V2,
 	TALK_SERVICE_PROTOCOL,
-	TALK_SERVICE_PROTOCOL_V2,
 	TALK_STATE_CHANNEL,
-	TALK_STATE_CHANNEL_V2,
 	type TalkIntegrationService,
-	type TalkIntegrationServiceV2,
 	type TalkStateSnapshot,
-	type TalkStateSnapshotV2,
 } from "../extensions/voice/talk-integration";
-import type { TalkPhase } from "../extensions/voice/talk-mode";
+import { TALK_SYSTEM_PROMPT, type TalkPhase } from "../extensions/voice/talk-mode";
 
 class FakeEventBus {
 	private readonly handlers = new Map<string, Array<(data: unknown) => void>>();
@@ -36,37 +31,14 @@ class FakeEventBus {
 	}
 }
 
-describe("talk integration service", () => {
-	test("coordinates v3 and v2 interaction services through Pi's event bus", async () => {
+describe("Talk integration service", () => {
+	test("publishes v4 read-only state and the canonical active instructions", () => {
 		const events = new FakeEventBus();
 		let enabled = false;
 		let inputEnabled = false;
 		let outputEnabled = false;
 		let phase: TalkPhase = "off";
 		const mode = {
-			async enable(_ctx: unknown, options: { inputEnabled?: boolean; outputEnabled?: boolean } = {}): Promise<boolean> {
-				enabled = true;
-				inputEnabled = options.inputEnabled ?? true;
-				outputEnabled = options.outputEnabled ?? true;
-				phase = inputEnabled ? "listening" : "standby";
-				return true;
-			},
-			async disable(): Promise<boolean> {
-				enabled = false;
-				inputEnabled = false;
-				outputEnabled = false;
-				phase = "off";
-				return true;
-			},
-			setInputEnabled(value: boolean): boolean {
-				inputEnabled = value;
-				phase = value ? "listening" : "standby";
-				return true;
-			},
-			setOutputEnabled(value: boolean): boolean {
-				outputEnabled = value;
-				return true;
-			},
 			isEnabled: () => enabled,
 			isInputEnabled: () => inputEnabled,
 			isOutputEnabled: () => outputEnabled,
@@ -81,9 +53,8 @@ describe("talk integration service", () => {
 				service = candidate;
 			},
 		});
+
 		expect(service).toBeDefined();
-		expect("setSafeTools" in service!).toBe(false);
-		expect("clearSafeTools" in service!).toBe(false);
 		expect(service!.getState()).toEqual({
 			protocol: TALK_SERVICE_PROTOCOL,
 			enabled: false,
@@ -91,106 +62,39 @@ describe("talk integration service", () => {
 			outputEnabled: false,
 			phase: "off",
 		});
+		expect(service!.getActiveConversationInstructions()).toBeUndefined();
+		expect("enable" in service!).toBe(false);
+		expect("disable" in service!).toBe(false);
+		expect("setInputEnabled" in service!).toBe(false);
+		expect("setOutputEnabled" in service!).toBe(false);
 
-		let compatibilityService: TalkIntegrationServiceV2 | undefined;
-		events.emit(TALK_SERVICE_CHANNEL_V2, {
-			protocol: TALK_SERVICE_PROTOCOL_V2,
-			accept(candidate: TalkIntegrationServiceV2) {
-				compatibilityService = candidate;
-			},
-		});
-		expect(compatibilityService).toBeDefined();
-		expect(compatibilityService!.protocol).toBe(TALK_SERVICE_PROTOCOL_V2);
-		expect(compatibilityService!.getState()).toEqual({
-			protocol: TALK_SERVICE_PROTOCOL_V2,
-			enabled: false,
-			inputEnabled: false,
-			outputEnabled: false,
-			phase: "off",
-		});
+		enabled = true;
+		inputEnabled = true;
+		outputEnabled = true;
+		phase = "listening";
+		expect(service!.getActiveConversationInstructions()).toBe(TALK_SYSTEM_PROMPT);
 
-		expect(() => compatibilityService!.setSafeTools(
-			"pi-relay",
-			["pi_supervisor"],
-			{} as any,
-		)).not.toThrow();
-		expect(() => compatibilityService!.clearSafeTools(
-			"pi-relay",
-			{} as any,
-		)).not.toThrow();
-		expect(service!.getState()).toEqual({
-			protocol: TALK_SERVICE_PROTOCOL,
-			enabled: false,
-			inputEnabled: false,
-			outputEnabled: false,
-			phase: "off",
-		});
-
-		expect(await compatibilityService!.enable({} as any, {
-			inputEnabled: false,
-			outputEnabled: false,
-		})).toBe(true);
-		expect(compatibilityService!.setInputEnabled(true)).toBe(true);
-		expect(compatibilityService!.setOutputEnabled(true)).toBe(true);
-		expect(service!.getState()).toEqual({
-			protocol: TALK_SERVICE_PROTOCOL,
-			enabled: true,
-			inputEnabled: true,
-			outputEnabled: true,
-			phase: "listening",
-		});
-		expect(() => compatibilityService!.setSafeTools("pi-relay", [])).not.toThrow();
-		expect(() => compatibilityService!.clearSafeTools("pi-relay")).not.toThrow();
-		expect(service!.getState()).toEqual({
-			protocol: TALK_SERVICE_PROTOCOL,
-			enabled: true,
-			inputEnabled: true,
-			outputEnabled: true,
-			phase: "listening",
-		});
-
-		let publishedV3: TalkStateSnapshot | undefined;
+		let published: TalkStateSnapshot | undefined;
 		events.on(TALK_STATE_CHANNEL, (data) => {
-			publishedV3 = data as TalkStateSnapshot;
-		});
-		let publishedV2: TalkStateSnapshotV2 | undefined;
-		events.on(TALK_STATE_CHANNEL_V2, (data) => {
-			publishedV2 = data as TalkStateSnapshotV2;
+			published = data as TalkStateSnapshot;
 		});
 		integration.publishState();
-		expect(publishedV3).toEqual({
+		expect(published).toEqual({
 			protocol: TALK_SERVICE_PROTOCOL,
 			enabled: true,
 			inputEnabled: true,
 			outputEnabled: true,
 			phase: "listening",
 		});
-		expect(publishedV2).toEqual({
-			protocol: TALK_SERVICE_PROTOCOL_V2,
-			enabled: true,
-			inputEnabled: true,
-			outputEnabled: true,
-			phase: "listening",
-		});
-
-		expect(await compatibilityService!.disable()).toBe(true);
 
 		integration.dispose();
-		let rediscoveredV3 = false;
+		let rediscovered = false;
 		events.emit(TALK_SERVICE_CHANNEL, {
 			protocol: TALK_SERVICE_PROTOCOL,
 			accept() {
-				rediscoveredV3 = true;
+				rediscovered = true;
 			},
 		});
-		let rediscoveredV2 = false;
-		events.emit(TALK_SERVICE_CHANNEL_V2, {
-			protocol: TALK_SERVICE_PROTOCOL_V2,
-			accept() {
-				rediscoveredV2 = true;
-			},
-		});
-		expect(rediscoveredV3).toBe(false);
-		expect(rediscoveredV2).toBe(false);
+		expect(rediscovered).toBe(false);
 	});
 });
