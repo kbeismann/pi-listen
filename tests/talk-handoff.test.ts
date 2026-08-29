@@ -474,6 +474,112 @@ describe("Talk session handoff", () => {
 		}
 	});
 
+	test("replaces a queued target before settlement", async () => {
+		const runtimeDirectory = await makeRuntimeDirectory();
+		const source = makeSession(runtimeDirectory, {
+			cwd: "/work/source",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/work/source",
+				["Move Talk to the correct conversation."],
+			),
+		});
+		const billing = makeSession(runtimeDirectory, {
+			cwd: "/work/payments",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/work/payments",
+				["Implement the billing migration."],
+			),
+		});
+		const eldenRing = makeSession(runtimeDirectory, {
+			cwd: "/home/player",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/home/player",
+				["Continue the Elden Ring route from Sites of Grace near Roderika."],
+			),
+		});
+		await source.controller.start(source.context as any);
+		await billing.controller.start(billing.context as any);
+		await eldenRing.controller.start(eldenRing.context as any);
+		try {
+			await source.mode.enable(source.context);
+			const tool = source.pi.tools.get(TALK_TO_SESSION_TOOL_NAME);
+			const first = await tool.execute(
+				"wrong-target",
+				{ description: "the billing migration conversation" },
+				undefined,
+				undefined,
+				source.context,
+			);
+			expect(first.details.status).toBe("queued");
+
+			const correction = await tool.execute(
+				"corrected-target",
+				{ description: "the Elden Ring conversation near Roderika" },
+				undefined,
+				undefined,
+				source.context,
+			);
+			expect(correction.details.status).toBe("queued");
+
+			await source.controller.completePendingHandoff();
+			expect(source.mode.enabled).toBe(false);
+			expect(billing.mode.enabled).toBe(false);
+			expect(eldenRing.mode.enabled).toBe(true);
+		} finally {
+			await stopSessions(source, billing, eldenRing);
+		}
+	});
+
+	test("cancels a queued target when its correction does not match", async () => {
+		const runtimeDirectory = await makeRuntimeDirectory();
+		const source = makeSession(runtimeDirectory, {
+			cwd: "/work/source",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/work/source",
+				["Move Talk after resolving the target."],
+			),
+		});
+		const billing = makeSession(runtimeDirectory, {
+			cwd: "/work/payments",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/work/payments",
+				["Implement the billing migration."],
+			),
+		});
+		await source.controller.start(source.context as any);
+		await billing.controller.start(billing.context as any);
+		try {
+			await source.mode.enable(source.context);
+			const tool = source.pi.tools.get(TALK_TO_SESSION_TOOL_NAME);
+			await tool.execute(
+				"initial-target",
+				{ description: "the billing migration conversation" },
+				undefined,
+				undefined,
+				source.context,
+			);
+			const correction = await tool.execute(
+				"unmatched-correction",
+				{ description: "the astronomy conversation" },
+				undefined,
+				undefined,
+				source.context,
+			);
+			expect(correction.details.status).toBe("no-match");
+
+			await source.controller.completePendingHandoff();
+			expect(source.mode.enabled).toBe(true);
+			expect(billing.mode.enabled).toBe(false);
+		} finally {
+			await stopSessions(source, billing);
+		}
+	});
+
 	test("keeps a completed handoff when local confirmation fails", async () => {
 		const runtimeDirectory = await makeRuntimeDirectory();
 		const source = makeSession(runtimeDirectory, { name: "Source", cwd: "/work/source" });
