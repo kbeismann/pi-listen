@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Natural Talk handoff between live Pi sessions** — only the current Talk
+  owner can queue `talk_to_relay` or `talk_to_session`. The latter resolves a
+  natural description against bounded live session metadata on demand and asks
+  for clarification rather than exposing session IDs or guessing.
+- **Minimal cross-session Talk lease** — live TUIs use private per-user Unix
+  sockets and one owner marker. Handoffs wait for current speech, preserve input
+  and output gates, activate the target's local Talk prompt, and restore the
+  source if activation fails. No daemon, heartbeat, Supervisor coupling,
+  context transfer, or subagent is involved.
+
 ## [7.2.2] - 2026-05-01
 
 ### Added

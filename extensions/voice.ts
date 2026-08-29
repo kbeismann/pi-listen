@@ -93,6 +93,7 @@ import {
 	type LocalSession,
 } from "./voice/local";
 import { createTalkMode, type TalkInputPreemptionLease } from "./voice/talk-mode";
+import { createTalkHandoffController } from "./voice/talk-handoff";
 import { installTalkIntegration } from "./voice/talk-integration";
 import { acquireTalkInputPreemption } from "./voice/talk-input-preemption";
 import { createTalkMutedStartup } from "./voice/talk-startup";
@@ -751,6 +752,7 @@ export default function (pi: ExtensionAPI) {
 
 	let dictationMode = false;
 	let talkMode: ReturnType<typeof createTalkMode> | null = null;
+	let talkHandoff: ReturnType<typeof createTalkHandoffController> | null = null;
 	let talkMutedStartup: ReturnType<typeof createTalkMutedStartup> | null = null;
 
 	// ─── Sound Feedback ──────────────────────────────────────────────────────
@@ -1966,6 +1968,9 @@ export default function (pi: ExtensionAPI) {
 			try { await talkMode?.disable(ctx ?? startCtx, { notify: false, awaitTranscription: true }); } catch (err) {
 				voiceDebug("talk cleanup threw during session_start", { error: String(err) });
 			}
+			try { await talkHandoff?.stop(); } catch (err) {
+				voiceDebug("talk handoff cleanup threw during session_start", { error: String(err) });
+			}
 			try { voiceCleanup(); } catch (err) {
 				voiceDebug("voiceCleanup threw during session_start", { error: String(err) });
 			}
@@ -1973,6 +1978,15 @@ export default function (pi: ExtensionAPI) {
 
 		ctx = startCtx;
 		currentCwd = startCtx.cwd;
+		try {
+			await talkHandoff?.start(startCtx);
+		} catch (err) {
+			voiceDebug("talk handoff endpoint failed during session_start", { error: String(err) });
+			startCtx.ui.notify(
+				`Talk session handoff is unavailable: ${err instanceof Error ? err.message : String(err)}`,
+				"warning",
+			);
+		}
 		const loaded = loadConfigWithSource(startCtx.cwd);
 		config = loaded.config;
 		configSource = loaded.source;
@@ -2068,6 +2082,9 @@ export default function (pi: ExtensionAPI) {
 		// can't leak ctx or skip the recognizer cache clear.
 		try { await talkMode?.disable(ctx ?? undefined, { notify: false, awaitTranscription: true }); } catch (err) {
 			voiceDebug("talk cleanup threw during shutdown", { error: String(err) });
+		}
+		try { await talkHandoff?.stop(); } catch (err) {
+			voiceDebug("talk handoff cleanup threw during shutdown", { error: String(err) });
 		}
 		try { voiceCleanup(); } catch (err) {
 			voiceDebug("voiceCleanup threw during shutdown", { error: String(err) });
@@ -3179,8 +3196,21 @@ export default function (pi: ExtensionAPI) {
 			await talkVoiceControl.stop();
 			talkVoiceControl = null;
 		},
+		claimOwnership: async () => {
+			const modeName = (ctx as (ExtensionContext & { mode?: string }) | null)?.mode;
+			if (process.platform === "win32" || (modeName && modeName !== "tui")) return;
+			if (!talkHandoff) throw new Error("Talk session handoff has not initialized.");
+			await talkHandoff.claimOwnership();
+		},
+		releaseOwnership: async () => {
+			await talkHandoff?.releaseOwnership();
+		},
 		onAudioChunk: updateAudioLevel,
 		onStateChange: () => publishTalkState(),
+	});
+	talkHandoff = createTalkHandoffController(pi, continuousTalk, {
+		onTransferred: () => talkMutedStartup?.suppress(),
+		onError: (message) => voiceDebug("Talk handoff error", { message }),
 	});
 	const talkIntegration = installTalkIntegration(
 		pi,
@@ -3309,6 +3339,7 @@ export default function (pi: ExtensionAPI) {
 	// current Pi exposes it at runtime.
 	(pi as any).on("agent_settled", async () => {
 		await continuousTalk.handleAgentSettled();
+		await talkHandoff?.completePendingHandoff();
 	});
 
 	pi.registerCommand("voice-speak", {

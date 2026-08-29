@@ -188,6 +188,13 @@ describe("continuous talk mode", () => {
 		expect(TALK_SYSTEM_PROMPT).not.toContain("read-only");
 	});
 
+	test("gives the Talk owner natural handoff guidance without session IDs", () => {
+		expect(TALK_SYSTEM_PROMPT).toContain("You currently own Talk");
+		expect(TALK_SYSTEM_PROMPT).toContain("use talk_to_relay");
+		expect(TALK_SYSTEM_PROMPT).toContain("use talk_to_session with their natural description");
+		expect(TALK_SYSTEM_PROMPT).toContain("Never ask for or expose a session ID");
+	});
+
 	test("renders Talk on one dedicated line without replacing Pi's footer", async () => {
 		const { context, mode } = makeHarness();
 
@@ -358,6 +365,33 @@ describe("continuous talk mode", () => {
 		expect(stops).toBe(0);
 		await harness.mode.disable(harness.context as any, { notify: false });
 		expect(stops).toBe(1);
+	});
+
+	test("holds cross-session ownership for exactly the Talk lifecycle", async () => {
+		let claims = 0;
+		let releases = 0;
+		const harness = makeHarness({
+			claimOwnership: async () => { claims += 1; },
+			releaseOwnership: async () => { releases += 1; },
+		});
+
+		expect(await harness.mode.enable(harness.context as any, { notify: false })).toBe(true);
+		expect(claims).toBe(1);
+		expect(releases).toBe(0);
+		await harness.mode.disable(harness.context as any, { notify: false });
+		expect(releases).toBe(1);
+	});
+
+	test("releases a failed ownership claim during activation rollback", async () => {
+		let releases = 0;
+		const harness = makeHarness({
+			claimOwnership: async () => { throw new Error("owned elsewhere"); },
+			releaseOwnership: async () => { releases += 1; },
+		});
+
+		expect(await harness.mode.enable(harness.context as any, { notify: false })).toBe(false);
+		expect(releases).toBe(1);
+		expect(harness.mode.getPhase()).toBe("off");
 	});
 
 	test("rolls back Talk when configured voice control cannot start", async () => {

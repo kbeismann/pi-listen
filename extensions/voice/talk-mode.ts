@@ -69,6 +69,10 @@ export interface TalkModeDependencies {
 	startVoiceControl?(config: VoiceConfig): Promise<void>;
 	/** Stop Talk's optional local gate-control surface during cleanup. */
 	stopVoiceControl?(): Promise<void>;
+	/** Claim the one cross-session Talk owner marker before audio setup starts. */
+	claimOwnership?(): Promise<void>;
+	/** Release cross-session ownership only after local audio has stopped. */
+	releaseOwnership?(): Promise<void>;
 	onAudioChunk?(chunk: Buffer): void;
 	onStateChange?(): void;
 }
@@ -113,7 +117,9 @@ const NON_INTERRUPTING_TALK_PHRASES = new Set([
 export const TALK_SYSTEM_PROMPT = `[CONTINUOUS TALK MODE ACTIVE]
 The user is having a spoken conversation with you. Talk changes how the user interacts, not which actions are authorized. Follow the session's existing instructions, active tools, and permission gates exactly; do not infer broader or narrower authority from Talk being active.
 
-Your response is converted to speech. Write for listening rather than visual scanning. Use short, natural sentences in the user's language. Do not use headings, bullet lists, tables, emoji, code blocks, raw URLs, file paths, or symbol-heavy identifiers. Avoid Markdown except for short inline links another active layer requires; speech output converts those links to natural labels. Describe other visual items conversationally instead. By default, aim for about three or four sentences so the response feels like a natural spoken turn. This is not a hard limit: use more sentences whenever correctness, safety, or a complete useful answer requires them. If the user explicitly asks for a longer, detailed, or step-by-step answer, honor that request without applying the short-response default. Do not add confidence scores, report footers, sign-offs, or other written-document conventions.`;
+Your response is converted to speech. Write for listening rather than visual scanning. Use short, natural sentences in the user's language. Do not use headings, bullet lists, tables, emoji, code blocks, raw URLs, file paths, or symbol-heavy identifiers. Avoid Markdown except for short inline links another active layer requires; speech output converts those links to natural labels. Describe other visual items conversationally instead. By default, aim for about three or four sentences so the response feels like a natural spoken turn. This is not a hard limit: use more sentences whenever correctness, safety, or a complete useful answer requires them. If the user explicitly asks for a longer, detailed, or step-by-step answer, honor that request without applying the short-response default. Do not add confidence scores, report footers, sign-offs, or other written-document conventions.
+
+You currently own Talk. If the user naturally asks to speak with Relay, use talk_to_relay. If the user asks for another live Pi session, use talk_to_session with their natural description. Never ask for or expose a session ID; if several sessions match, ask one natural clarification using the choices returned by the tool.`;
 
 function notify(ctx: TalkContext | undefined, message: string, level: "info" | "warning" | "error" = "info"): void {
 	if (ctx?.hasUI && ctx.ui?.notify) ctx.ui.notify(message, level);
@@ -768,6 +774,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		setPhase("starting", ctx);
 
 		try {
+			await dependencies.claimOwnership?.();
 			if (state.transcription) await state.transcription;
 			if (state.lifecycleEpoch !== epoch || state.prepareAbort.signal.aborted) throw makeAbortError();
 			await dependencies.prepare(state.config, state.prepareAbort.signal);
@@ -822,6 +829,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			state.speechDetector = undefined;
 			try { await dependencies.stopVoiceControl?.(); } catch {}
 			await closeAudioRoute(ctx);
+			try { await dependencies.releaseOwnership?.(); } catch {}
 			setPhase("off", ctx);
 			if ((error as Error)?.name !== "AbortError") {
 				notify(ctx, `Could not start talk mode: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -877,6 +885,11 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			try { await (ctx as any).waitForIdle?.(); } catch {}
 		}
 		await closeAudioRoute(ctx);
+		try {
+			await dependencies.releaseOwnership?.();
+		} catch (error) {
+			notify(ctx, `Could not release Talk ownership: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
 		state.currentRun = undefined;
 		state.generalSpeechSuppressed = false;
 		state.config = undefined;

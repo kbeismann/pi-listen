@@ -183,6 +183,25 @@ The mode is isolated from ordinary Pi turns:
 - Ordinary TTS remains controlled separately by `ttsEnabled`; talk speech does not enable it globally.
 - It permits short inline Markdown links when another active layer needs them; Talk speech renders their natural labels.
 
+The Pi session that currently owns Talk can hand the spoken conversation to
+another live TUI after its current response finishes. Say that you want to talk
+to Relay for the direct `talk_to_relay` path, or describe another session
+naturally for `talk_to_session`. The current owner searches live endpoint
+metadata on demand using session names, working directories, and a bounded
+recent-conversation projection. Pi does not preload that catalog into prompts,
+and the user never needs to know a session ID. When several sessions match,
+Talk asks one clarification using at most three natural choices.
+
+Each live TUI exposes one private per-user Unix socket. A single owner marker is
+the complete cross-session lease; there is no daemon, heartbeat, Supervisor
+lease, transferred conversation context, or subagent. The source releases Talk
+only after its spoken response drains, the target starts its own local Talk
+controller with the same input and output gate settings, and the source restores
+Talk if activation fails. The target's next turn receives its own Talk prompt,
+so prompt responsibility moves without copying prompt text between sessions.
+Native Windows does not expose these session-handoff sockets; WSL, Linux, and
+macOS do.
+
 Talk publishes a read-only v4 integration service with its current state and,
 while active, the exact conversation instruction used by `/talk`. Other layers
 can use that instruction for custom turns, but cannot enable, disable, or
