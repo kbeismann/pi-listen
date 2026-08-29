@@ -200,17 +200,18 @@ describe("continuous talk mode", () => {
 		const widget = context.widgetComponent;
 		const activeLine = widget.render(72)[0];
 		const plainActiveLine = activeLine.replace(/\x1b\[[0-9;]*m/g, "");
-		expect(activeLine).toStartWith("\x1b[0;1;38;2;0;0;0;48;2;255;0;255m");
-		expect(activeLine).toEndWith("\x1b[0m");
+		expect(activeLine).toBe(
+			"\x1b[0;1;38;2;0;0;0;48;2;255;0;255mtalk: on | phase: listening | output: on | input: on\x1b[0m",
+		);
 		expect(plainActiveLine.trim()).toBe(
-			"TALK MODE ON | LISTENING | OUTPUT ON | INPUT ON",
+			"talk: on | phase: listening | output: on | input: on",
 		);
 		expect(widget.render(20)[0].replace(/\x1b\[[0-9;]*m/g, "").length).toBeLessThanOrEqual(20);
 
 		mode.handleInput(context as any);
 		const thinkingLine = widget.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "");
 		expect(thinkingLine.trim()).toBe(
-			"TALK MODE ON | THINKING | OUTPUT ON | INPUT ON",
+			"talk: on | phase: thinking | output: on | input: on",
 		);
 		expect(context.widgetUpdates).toHaveLength(1);
 		expect(context.widgetRenderRequests).toBeGreaterThan(0);
@@ -229,8 +230,8 @@ describe("continuous talk mode", () => {
 		context.mode = "rpc";
 
 		expect(await mode.enable(context as any)).toBe(true);
-		expect(context.statuses.get("continuous-talk")).toContain(
-			"TALK MODE ON | LISTENING | OUTPUT ON | INPUT ON",
+		expect(context.statuses.get("continuous-talk")?.replace(/\x1b\[[0-9;]*m/g, "")).toContain(
+			"talk: on | phase: listening | output: on | input: on",
 		);
 		expect(context.widgetUpdates).toHaveLength(0);
 
@@ -252,7 +253,7 @@ describe("continuous talk mode", () => {
 		expect(harness.captures).toEqual([]);
 		const widget = harness.context.widgetComponent;
 		expect(widget.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "").trim()).toBe(
-			"TALK MODE ON | STANDBY | OUTPUT OFF | INPUT OFF",
+			"talk: on | phase: standby | output: off | input: off",
 		);
 
 		await harness.mode.beginAgentRun("base", harness.context as any);
@@ -271,7 +272,7 @@ describe("continuous talk mode", () => {
 			notify: false,
 		})).toBe(true);
 		expect(widget.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "").trim()).toBe(
-			"TALK MODE ON | STANDBY | OUTPUT ON | INPUT OFF",
+			"talk: on | phase: standby | output: on | input: off",
 		);
 		harness.mode.handleTurnStart(harness.context as any);
 		harness.mode.handleMessageEnd({
@@ -290,7 +291,7 @@ describe("continuous talk mode", () => {
 		})).toBe(true);
 		expect(harness.mode.getPhase()).toBe("listening");
 		expect(widget.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "").trim()).toBe(
-			"TALK MODE ON | LISTENING | OUTPUT ON | INPUT ON",
+			"talk: on | phase: listening | output: on | input: on",
 		);
 		expect(harness.captures).toHaveLength(1);
 		expect(harness.mode.setInputEnabled(false, harness.context as any, {
@@ -299,7 +300,7 @@ describe("continuous talk mode", () => {
 		expect(harness.captures[0]!.killedWith).toBe("SIGKILL");
 		expect(harness.mode.getPhase()).toBe("standby");
 		expect(widget.render(72)[0].replace(/\x1b\[[0-9;]*m/g, "").trim()).toBe(
-			"TALK MODE ON | STANDBY | OUTPUT ON | INPUT OFF",
+			"talk: on | phase: standby | output: on | input: off",
 		);
 		expect(harness.mode.statusLines()).toContain("input: off");
 		expect(harness.mode.statusLines()).toContain("output: on");

@@ -4,9 +4,15 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
-import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { ContinuousTalkConfig, VoiceConfig } from "./config";
 import { createEnergyVad } from "./energy-vad";
+import {
+	formatTalkStatus,
+	formatTalkWidgetLine,
+	PersistentDockStatus,
+	TALK_DOCK_KEY,
+	type DockStatusContext,
+} from "./dock-status";
 import type { TalkAudioRoute } from "./pipewire-aec";
 import type { SpeechDetector } from "./sherpa-vad";
 import { prepareForSpeech } from "./tts-text-filter";
@@ -94,9 +100,6 @@ interface UtteranceInterruption {
 	beganDuringPlayback: boolean;
 }
 
-const STATUS_KEY = "continuous-talk";
-const TALK_MODE_HIGHLIGHT = "\x1b[0;1;38;2;0;0;0;48;2;255;0;255m";
-const ANSI_RESET = "\x1b[0m";
 const INTERRUPTION_ENTRY_TYPE = "pi-listen-talk-interruption";
 const INTERRUPTED_AFTER_SPEECH = "[The user interrupted here; the remainder of the generated response was not heard.]";
 const INTERRUPTED_BEFORE_SPEECH = "[The user interrupted before any of this response was heard.]";
@@ -167,45 +170,6 @@ function isSubstantiveInterruption(text: string): boolean {
 	return !normalized.split(/\s+/).every((word) => NON_INTERRUPTING_TALK_WORDS.has(word));
 }
 
-function talkStateLabel(
-	phase: Exclude<TalkPhase, "off">,
-	outputEnabled: boolean,
-	inputEnabled: boolean,
-): string {
-	const phaseLabel = phase === "starting" || phase === "stopping" || phase === "error"
-		? phase.toUpperCase()
-		: `ON | ${phase.toUpperCase()}`;
-	return `${phaseLabel} | OUTPUT ${outputEnabled ? "ON" : "OFF"} | INPUT ${inputEnabled ? "ON" : "OFF"}`;
-}
-
-/**
- * Keep Talk's phase and independent voice gates on a dedicated line without
- * replacing Pi's normal footer. Talk owns this persistent state presentation
- * so integrations do not have to duplicate it. The fixed true-color neon
- * magenta is deliberately independent of the active theme so Talk's microphone
- * ownership is unmistakable at a glance.
- */
-function formatTalkStatus(
-	phase: Exclude<TalkPhase, "off">,
-	outputEnabled: boolean,
-	inputEnabled: boolean,
-): string {
-	return `${TALK_MODE_HIGHLIGHT} TALK MODE ${talkStateLabel(phase, outputEnabled, inputEnabled)} ${ANSI_RESET}`;
-}
-
-function formatTalkWidgetLine(
-	phase: Exclude<TalkPhase, "off">,
-	outputEnabled: boolean,
-	inputEnabled: boolean,
-	width: number,
-): string {
-	return truncateToWidth(
-		formatTalkStatus(phase, outputEnabled, inputEnabled),
-		Math.max(0, Math.floor(width)),
-		"",
-	);
-}
-
 /**
  * Hands-free local-audio conversation controller.
  *
@@ -222,8 +186,6 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		outputEnabled: false,
 		inputPreemptionLeases: 0,
 		phase: "off" as TalkPhase,
-		talkWidgetActive: false,
-		requestTalkWidgetRender: undefined as (() => void) | undefined,
 		lifecycleEpoch: 0,
 		runCounter: 0,
 		currentRun: undefined as TalkRun | undefined,
@@ -255,57 +217,28 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		messageStreams: new Map<string, MessageStreamState>(),
 		interruptedMessages: new Map<string, string>(),
 	};
+	const dockStatus = new PersistentDockStatus(
+		TALK_DOCK_KEY,
+		(width) => {
+			const visiblePhase = state.phase === "off" ? "stopping" : state.phase;
+			return formatTalkWidgetLine(
+				visiblePhase,
+				state.outputEnabled,
+				state.inputEnabled,
+				width,
+			);
+		},
+	);
 
 	function setPhase(phase: TalkPhase, ctx?: TalkContext): void {
 		state.phase = phase;
 		if (ctx) state.ctx = ctx;
 		dependencies.onStateChange?.();
 		const target = ctx ?? state.ctx;
-		if (!target?.hasUI || !target.ui) return;
-		if (phase === "off") {
-			if (state.talkWidgetActive) {
-				target.ui.setWidget(STATUS_KEY, undefined);
-				state.talkWidgetActive = false;
-				state.requestTalkWidgetRender = undefined;
-			}
-			target.ui.setStatus(STATUS_KEY, undefined);
-			return;
-		}
-		// Pi releases before run-mode contexts exposed `mode`; those releases
-		// only supplied this UI path to their interactive runtime.
-		if ((target as TalkContext & { mode?: string }).mode !== undefined
-			&& (target as TalkContext & { mode?: string }).mode !== "tui") {
-			target.ui.setStatus(
-				STATUS_KEY,
-				formatTalkStatus(phase, state.outputEnabled, state.inputEnabled),
-			);
-			return;
-		}
-		target.ui.setStatus(STATUS_KEY, undefined);
-		if (!state.talkWidgetActive) {
-			target.ui.setWidget(
-				STATUS_KEY,
-				(tui) => {
-					state.requestTalkWidgetRender = () => tui.requestRender();
-					return {
-						invalidate() {},
-						render(width: number): string[] {
-							const visiblePhase = state.phase === "off" ? "stopping" : state.phase;
-							return [formatTalkWidgetLine(
-								visiblePhase,
-								state.outputEnabled,
-								state.inputEnabled,
-								width,
-							)];
-						},
-					};
-				},
-				{ placement: "belowEditor" },
-			);
-			state.talkWidgetActive = true;
-			return;
-		}
-		state.requestTalkWidgetRender?.();
+		dockStatus.refresh(target as DockStatusContext | undefined, {
+			visible: phase !== "off",
+			fallbackText: formatTalkStatus(phase, state.outputEnabled, state.inputEnabled),
+		});
 	}
 
 	function readyPhase(): "listening" | "standby" {

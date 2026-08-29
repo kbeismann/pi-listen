@@ -5,7 +5,7 @@
  * Why this exists: `ctx.ui.setWidget(key, content)` writes to a key-slotted
  * store. Two widgets with different keys coexist; two widgets with the
  * same key overwrite. v7.1 introduces install + playback widgets that
- * must coexist with the recording widget, so we need a registry that
+ * must coexist with the persistent voice-input state row, so we need a registry that
  * (a) prevents same-key collision, (b) lets completed widgets evict
  * themselves so the registry doesn't leak across long sessions, and
  * (c) survives misbehaving widgets that throw on disposal.
@@ -52,8 +52,7 @@ function debug(...args: unknown[]) {
 export interface DisposableWidget {
 	/**
 	 * Stable widget-key the slot writes to. Install widgets use
-	 * `installWidgetKey(modelId)`; recording uses `"voice-recording"`;
-	 * playback uses `"voice-tts-playback"`.
+	 * `installWidgetKey(modelId)`; playback uses `"voice-tts-playback"`.
 	 */
 	readonly key: string;
 	/** Tear down the widget. MUST be idempotent (re-entry returns early). */
@@ -145,9 +144,8 @@ export function installWidgetKey(modelId: string): string {
 	return `voice-tts-install:${modelId}`;
 }
 
-/** Stable widget keys for non-install widgets. */
+/** Stable widget keys for transient non-install widgets. */
 export const WIDGET_KEY = {
-	recording: "voice-recording",
 	ttsPlayback: "voice-tts-playback",
 } as const;
 
