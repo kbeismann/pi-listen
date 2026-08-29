@@ -93,6 +93,9 @@ function makeContext(options: {
 				notifications.push({ message, level });
 			},
 		},
+		setIdle(idle: boolean) {
+			options.idle = idle;
+		},
 		notifications,
 	};
 }
@@ -152,6 +155,14 @@ async function makeRuntimeDirectory(): Promise<string> {
 
 async function stopSessions(...sessions: SessionHarness[]): Promise<void> {
 	await Promise.all(sessions.map((session) => session.controller.stop()));
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+	const deadline = Date.now() + 1_000;
+	while (!predicate()) {
+		if (Date.now() >= deadline) throw new Error("Timed out waiting for test state.");
+		await new Promise<void>((resolve) => setTimeout(resolve, 10));
+	}
 }
 
 describe("Talk session handoff", () => {
@@ -231,6 +242,54 @@ describe("Talk session handoff", () => {
 			await expect(tool.execute("relay-again", {}, undefined, undefined, source.context)).rejects.toThrow(
 				"Only the Pi session that currently owns Talk",
 			);
+		} finally {
+			await stopSessions(source, relay);
+		}
+	});
+
+	test("queues a Relay handoff while its target turn is active", async () => {
+		const runtimeDirectory = await makeRuntimeDirectory();
+		const source = makeSession(runtimeDirectory, {
+			name: "Voice planning",
+			cwd: "/work/pi-listen",
+		});
+		const relay = makeSession(runtimeDirectory, {
+			name: "Relay",
+			cwd: "/work/chezmoi",
+			idle: false,
+			recentAssistant: "Relay is assessing an autonomous cue.",
+		});
+		await source.controller.start(source.context as any);
+		await relay.controller.start(relay.context as any);
+		try {
+			let targetService: TalkTargetRegistrationService | undefined;
+			relay.pi.events.emit(TALK_TARGET_SERVICE_CHANNEL, {
+				protocol: TALK_TARGET_SERVICE_PROTOCOL,
+				accept(service: TalkTargetRegistrationService) {
+					targetService = service;
+				},
+			});
+			targetService!.registerAlias("relay");
+			await source.mode.enable(source.context);
+
+			const result = await source.pi.tools.get(TALK_TO_RELAY_TOOL_NAME).execute(
+				"busy-relay",
+				{},
+				undefined,
+				undefined,
+				source.context,
+			);
+			expect(result.details.status).toBe("queued");
+			expect(result.content[0].text).toContain("active target turn");
+
+			const completion = source.controller.completePendingHandoff();
+			await waitUntil(() => !source.mode.enabled);
+			expect(relay.mode.enabled).toBe(false);
+
+			relay.context.setIdle(true);
+			await completion;
+			expect(relay.mode.enabled).toBe(true);
+			expect(source.context.notifications.at(-1)?.message).toContain("Talk moved to Relay");
 		} finally {
 			await stopSessions(source, relay);
 		}

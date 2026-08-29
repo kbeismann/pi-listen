@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Handoffs to active targets** — a live target remains selectable while it is
+  processing a turn. Talk waits for the target to settle without preempting its
+  work instead of rejecting the request and asking the user to try again.
+
 ### Added
 
 - **Natural Talk handoff between live Pi sessions** — only the current Talk
