@@ -186,7 +186,10 @@ function recentConversation(ctx: ExtensionContext): {
 	const messages: string[] = [];
 	let latestUserText: string | undefined;
 	let characters = 0;
-	for (let index = branch.length - 1; index >= 0 && messages.length < 8; index--) {
+	// Let the character budget bound discovery. A fixed message count lets a
+	// short run of operational turns hide the conversation's still-relevant
+	// topic even when the bounded projection has ample room for it.
+	for (let index = branch.length - 1; index >= 0; index--) {
 		const entry = branch[index] as {
 			type?: string;
 			message?: { role?: string; content?: unknown };

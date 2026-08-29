@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { SessionManager } from "@mariozechner/pi-coding-agent";
 import {
 	createTalkHandoffController,
 	talkHandoffConfirmationText,
@@ -57,19 +58,22 @@ interface SessionHarness {
 	};
 }
 
+interface ContextOptions {
+	name?: string;
+	cwd: string;
+	recentUser?: string;
+	recentAssistant?: string;
+	idle?: boolean;
+	sessionManager?: Pick<SessionManager, "getBranch" | "getSessionName">;
+}
+
 const runtimeDirectories: string[] = [];
 
 afterEach(async () => {
 	await Promise.all(runtimeDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-function makeContext(options: {
-	name?: string;
-	cwd: string;
-	recentUser?: string;
-	recentAssistant?: string;
-	idle?: boolean;
-}) {
+function makeContext(options: ContextOptions) {
 	const notifications: Array<{ message: string; level: string }> = [];
 	const branch = [
 		...(options.recentUser
@@ -84,7 +88,7 @@ function makeContext(options: {
 		mode: "tui",
 		cwd: options.cwd,
 		isIdle: () => options.idle ?? true,
-		sessionManager: {
+		sessionManager: options.sessionManager ?? {
 			getBranch: () => branch,
 			getSessionName: () => options.name,
 		},
@@ -151,6 +155,38 @@ async function makeRuntimeDirectory(): Promise<string> {
 	const directory = await mkdtemp(path.join(os.tmpdir(), "pi-talk-handoff-test-"));
 	runtimeDirectories.push(directory);
 	return directory;
+}
+
+function makeReopenedSessionManager(
+	runtimeDirectory: string,
+	cwd: string,
+	messages: string[],
+): SessionManager {
+	const sessionDirectory = path.join(runtimeDirectory, "sessions");
+	const created = SessionManager.create(cwd, sessionDirectory);
+	for (const [index, content] of messages.entries()) {
+		created.appendMessage({ role: "user", content, timestamp: index + 1 });
+	}
+	created.appendMessage({
+		role: "assistant",
+		content: [{ type: "text", text: "Ready." }],
+		api: "anthropic-messages",
+		provider: "test",
+		model: "test",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: messages.length + 1,
+	});
+	const sessionFile = created.getSessionFile();
+	if (!sessionFile) throw new Error("Persisted test session has no file.");
+	return SessionManager.open(sessionFile, sessionDirectory, cwd);
 }
 
 async function stopSessions(...sessions: SessionHarness[]): Promise<void> {
@@ -333,6 +369,60 @@ describe("Talk session handoff", () => {
 			expect(documentation.mode.enabled).toBe(false);
 		} finally {
 			await stopSessions(source, billing, documentation);
+		}
+	});
+
+	test("finds an older topic within bounded reopened session context", async () => {
+		const runtimeDirectory = await makeRuntimeDirectory();
+		const source = makeSession(runtimeDirectory, {
+			cwd: "/work/source",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/work/source",
+				["Move Talk to the Elden Ring session."],
+			),
+		});
+		const eldenRing = makeSession(runtimeDirectory, {
+			cwd: "/home/player",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/home/player",
+				[
+					"Guide this Elden Ring run from Sites of Grace near Roderika.",
+					...Array.from(
+						{ length: 9 },
+						(_value, index) => `Short Talk handoff diagnostic note ${index + 1}.`,
+					),
+				],
+			),
+		});
+		const workspaceConfiguration = makeSession(runtimeDirectory, {
+			cwd: "/work/configuration",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/work/configuration",
+				["Review workspace configuration."],
+			),
+		});
+		await source.controller.start(source.context as any);
+		await eldenRing.controller.start(eldenRing.context as any);
+		await workspaceConfiguration.controller.start(workspaceConfiguration.context as any);
+		try {
+			await source.mode.enable(source.context);
+			const result = await source.pi.tools.get(TALK_TO_SESSION_TOOL_NAME).execute(
+				"older-topic",
+				{ description: "the Elden Ring session" },
+				undefined,
+				undefined,
+				source.context,
+			);
+			expect(result.details.status).toBe("queued");
+
+			await source.controller.completePendingHandoff();
+			expect(eldenRing.mode.enabled).toBe(true);
+			expect(workspaceConfiguration.mode.enabled).toBe(false);
+		} finally {
+			await stopSessions(source, eldenRing, workspaceConfiguration);
 		}
 	});
 
