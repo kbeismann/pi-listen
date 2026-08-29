@@ -426,6 +426,54 @@ describe("Talk session handoff", () => {
 		}
 	});
 
+	test("does not match a target through a partial word", async () => {
+		const runtimeDirectory = await makeRuntimeDirectory();
+		const source = makeSession(runtimeDirectory, {
+			cwd: "/work/source",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/work/source",
+				["Move Talk to the Elden Ring session."],
+			),
+		});
+		const eldenGuide = makeSession(runtimeDirectory, {
+			cwd: "/home/player",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/home/player",
+				["Discuss Elden builds."],
+			),
+		});
+		const configuration = makeSession(runtimeDirectory, {
+			cwd: "/work/configuration",
+			sessionManager: makeReopenedSessionManager(
+				runtimeDirectory,
+				"/work/configuration",
+				["The configuration change is requiring validation."],
+			),
+		});
+		await source.controller.start(source.context as any);
+		await eldenGuide.controller.start(eldenGuide.context as any);
+		await configuration.controller.start(configuration.context as any);
+		try {
+			await source.mode.enable(source.context);
+			const result = await source.pi.tools.get(TALK_TO_SESSION_TOOL_NAME).execute(
+				"complete-terms",
+				{ description: "the Elden Ring session" },
+				undefined,
+				undefined,
+				source.context,
+			);
+			expect(result.details.status).toBe("queued");
+
+			await source.controller.completePendingHandoff();
+			expect(eldenGuide.mode.enabled).toBe(true);
+			expect(configuration.mode.enabled).toBe(false);
+		} finally {
+			await stopSessions(source, eldenGuide, configuration);
+		}
+	});
+
 	test("keeps a completed handoff when local confirmation fails", async () => {
 		const runtimeDirectory = await makeRuntimeDirectory();
 		const source = makeSession(runtimeDirectory, { name: "Source", cwd: "/work/source" });

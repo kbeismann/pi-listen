@@ -288,6 +288,10 @@ function searchTerms(description: string): string[] {
 	))];
 }
 
+function termSet(value: string): Set<string> {
+	return new Set(normalized(value).split(/\s+/).filter(Boolean));
+}
+
 function scoreTarget(target: TalkTargetDescriptor, description: string): number {
 	const query = normalized(description);
 	const name = normalized(target.name ?? "");
@@ -296,14 +300,21 @@ function scoreTarget(target: TalkTargetDescriptor, description: string): number 
 	const aliases = normalized(target.aliases.join(" "));
 	const recent = normalized(target.recentText);
 	const label = normalized(targetLabel(target));
+	const nameTerms = termSet(name);
+	const projectTerms = termSet(project);
+	const cwdTerms = termSet(cwd);
+	const aliasTerms = termSet(aliases);
+	const recentTerms = termSet(recent);
 	let score = 0;
 	if (query && [name, project, aliases, label].includes(query)) score += 100;
 	for (const term of searchTerms(description)) {
-		if (aliases.includes(term)) score += 10;
-		if (name.includes(term)) score += 7;
-		if (project.includes(term)) score += 5;
-		else if (cwd.includes(term)) score += 3;
-		if (recent.includes(term)) score += 1;
+		// Search terms are words, not arbitrary substrings: a target discussing
+		// "requiring" must not appear to match a request for "Ring".
+		if (aliasTerms.has(term)) score += 10;
+		if (nameTerms.has(term)) score += 7;
+		if (projectTerms.has(term)) score += 5;
+		else if (cwdTerms.has(term)) score += 3;
+		if (recentTerms.has(term)) score += 1;
 	}
 	return score;
 }
