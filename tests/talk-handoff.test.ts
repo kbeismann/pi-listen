@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	createTalkHandoffController,
+	talkHandoffConfirmationText,
 	TALK_TARGET_SERVICE_CHANNEL,
 	TALK_TARGET_SERVICE_PROTOCOL,
 	TALK_TO_RELAY_TOOL_NAME,
@@ -48,7 +49,10 @@ interface SessionHarness {
 		enabled: boolean;
 		inputEnabled: boolean;
 		outputEnabled: boolean;
+		confirmations: string[];
+		confirmationError?: Error;
 		enable(ctx: unknown, options?: { inputEnabled?: boolean; outputEnabled?: boolean }): Promise<boolean>;
+		speakConfirmation(text: string): Promise<boolean>;
 		disable(): Promise<boolean>;
 	};
 }
@@ -104,6 +108,8 @@ function makeSession(
 		enabled: false,
 		inputEnabled: false,
 		outputEnabled: false,
+		confirmations: [] as string[],
+		confirmationError: undefined as Error | undefined,
 		isEnabled: () => mode.enabled,
 		isRequestedInputEnabled: () => mode.inputEnabled,
 		isOutputEnabled: () => mode.outputEnabled,
@@ -113,6 +119,12 @@ function makeSession(
 			mode.enabled = true;
 			mode.inputEnabled = enableOptions.inputEnabled ?? true;
 			mode.outputEnabled = enableOptions.outputEnabled ?? true;
+			return true;
+		},
+		async speakConfirmation(text: string) {
+			if (!mode.outputEnabled) return false;
+			if (mode.confirmationError) throw mode.confirmationError;
+			mode.confirmations.push(text);
 			return true;
 		},
 		async disable() {
@@ -143,6 +155,27 @@ async function stopSessions(...sessions: SessionHarness[]): Promise<void> {
 }
 
 describe("Talk session handoff", () => {
+	test("builds a fixed local confirmation from target identity", () => {
+		expect(talkHandoffConfirmationText({
+			aliases: ["relay"],
+			cwd: "/work/chezmoi",
+			name: "A name Relay does not need",
+		})).toBe("You're now talking to Relay.");
+		expect(talkHandoffConfirmationText({
+			aliases: [],
+			cwd: "/work/payments",
+			name: "API migration!",
+		})).toBe("You're now talking to API migration.");
+		expect(talkHandoffConfirmationText({
+			aliases: [],
+			cwd: "/work/payments",
+		})).toBe("You're now talking to the payments project session.");
+		expect(talkHandoffConfirmationText({
+			aliases: [],
+			cwd: "/",
+		})).toBe("Talk is now active in this session.");
+	});
+
 	test("moves Talk directly to the live Relay target only after settlement", async () => {
 		const runtimeDirectory = await makeRuntimeDirectory();
 		const source = makeSession(runtimeDirectory, {
@@ -183,6 +216,7 @@ describe("Talk session handoff", () => {
 			expect(relay.mode.enabled).toBe(true);
 			expect(relay.mode.inputEnabled).toBe(true);
 			expect(relay.mode.outputEnabled).toBe(false);
+			expect(relay.mode.confirmations).toEqual([]);
 			expect(source.context.notifications.at(-1)?.message).toContain("Talk moved to Relay");
 			expect(relay.context.notifications.at(-1)?.message).toContain("Talk moved here from Voice planning");
 			const alreadyThere = await relay.pi.tools.get(TALK_TO_RELAY_TOOL_NAME).execute(
@@ -236,9 +270,36 @@ describe("Talk session handoff", () => {
 
 			await source.controller.completePendingHandoff();
 			expect(billing.mode.enabled).toBe(true);
+			expect(billing.mode.confirmations).toEqual(["You're now talking to API work."]);
 			expect(documentation.mode.enabled).toBe(false);
 		} finally {
 			await stopSessions(source, billing, documentation);
+		}
+	});
+
+	test("keeps a completed handoff when local confirmation fails", async () => {
+		const runtimeDirectory = await makeRuntimeDirectory();
+		const source = makeSession(runtimeDirectory, { name: "Source", cwd: "/work/source" });
+		const target = makeSession(runtimeDirectory, { name: "Target", cwd: "/work/target" });
+		await source.controller.start(source.context as any);
+		await target.controller.start(target.context as any);
+		try {
+			await source.mode.enable(source.context);
+			target.mode.confirmationError = new Error("speaker unavailable");
+			await source.pi.tools.get(TALK_TO_SESSION_TOOL_NAME).execute(
+				"target",
+				{ description: "Target" },
+				undefined,
+				undefined,
+				source.context,
+			);
+
+			await source.controller.completePendingHandoff();
+			expect(source.mode.enabled).toBe(false);
+			expect(target.mode.enabled).toBe(true);
+			expect(target.context.notifications.at(-1)?.message).toContain("confirmation could not be spoken");
+		} finally {
+			await stopSessions(source, target);
 		}
 	});
 

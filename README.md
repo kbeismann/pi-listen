@@ -197,8 +197,12 @@ the complete cross-session lease; there is no daemon, heartbeat, Supervisor
 lease, transferred conversation context, or subagent. The source releases Talk
 only after its spoken response drains, the target starts its own local Talk
 controller with the same input and output gate settings, and the source restores
-Talk if activation fails. The target's next turn receives its own Talk prompt,
-so prompt responsibility moves without copying prompt text between sessions.
+Talk if activation fails. With output enabled, the target immediately speaks a
+fixed local acknowledgement using its Relay alias, session name, project
+directory, or a generic fallback. That acknowledgement does not invoke a model
+or enter conversation context. The target's next turn receives its own Talk
+prompt, so prompt responsibility moves without copying prompt text between
+sessions.
 Native Windows does not expose these session-handoff sockets; WSL, Linux, and
 macOS do.
 

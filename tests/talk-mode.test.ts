@@ -315,6 +315,42 @@ describe("continuous talk mode", () => {
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
+	test("speaks a handoff confirmation locally without creating a model turn", async () => {
+		const harness = makeHarness();
+		await harness.mode.enable(harness.context as any, { notify: false });
+
+		expect(await harness.mode.speakConfirmation(
+			"You're now talking to Relay.",
+			harness.context as any,
+		)).toBe(true);
+		expect(harness.spoken).toEqual(["You're now talking to Relay."]);
+		expect(harness.captures[0]!.killedWith).toBe("SIGKILL");
+		expect(harness.captures).toHaveLength(2);
+		expect(harness.mode.getPhase()).toBe("listening");
+		expect(harness.pi.sentMessages).toEqual([]);
+
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("does not speak a handoff confirmation through a closed output gate", async () => {
+		const harness = makeHarness();
+		await harness.mode.enable(harness.context as any, {
+			inputEnabled: false,
+			outputEnabled: false,
+			notify: false,
+		});
+
+		expect(await harness.mode.speakConfirmation(
+			"You're now talking to Relay.",
+			harness.context as any,
+		)).toBe(false);
+		expect(harness.spoken).toEqual([]);
+		expect(harness.mode.getPhase()).toBe("standby");
+		expect(harness.pi.sentMessages).toEqual([]);
+
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
 	test("restores only the latest requested input state after nested preemption", async () => {
 		const harness = makeHarness();
 		await harness.mode.enable(harness.context as any, { notify: false });

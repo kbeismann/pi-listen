@@ -900,6 +900,83 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		return wasActive;
 	}
 
+	/**
+	 * Speak a fixed handoff acknowledgement from the newly active target without
+	 * creating a model turn or adding anything to conversation context.
+	 */
+	async function speakConfirmation(
+		text: string,
+		ctx: TalkContext = state.ctx!,
+	): Promise<boolean> {
+		const confirmation = text.trim();
+		if (!confirmation || !state.enabled || !state.outputEnabled || !state.config || !ctx) {
+			return false;
+		}
+		const lifecycleEpoch = state.lifecycleEpoch;
+		const speechEpoch = state.speechEpoch;
+		let completed = false;
+		const task = state.speechTail.catch(() => {}).then(async () => {
+			if (
+				!state.enabled
+				|| !state.outputEnabled
+				|| !state.config
+				|| lifecycleEpoch !== state.lifecycleEpoch
+				|| speechEpoch !== state.speechEpoch
+			) return;
+			if (!bargeInEnabled()) stopCapture();
+			const controller = new AbortController();
+			state.speechAbort = controller;
+			setPhase("speaking", ctx);
+			try {
+				const result = await dependencies.speak(
+					confirmation,
+					state.config,
+					ctx,
+					controller.signal,
+					state.audioRoute,
+					handlePlaybackStart,
+				);
+				if (
+					controller.signal.aborted
+					|| lifecycleEpoch !== state.lifecycleEpoch
+					|| speechEpoch !== state.speechEpoch
+				) return;
+				if (result?.playbackPending) {
+					state.sharedPlaybackActive = true;
+					await dependencies.finishSpeech?.();
+					if (
+						controller.signal.aborted
+						|| lifecycleEpoch !== state.lifecycleEpoch
+						|| speechEpoch !== state.speechEpoch
+					) return;
+					state.sharedPlaybackActive = false;
+				}
+				completed = true;
+			} catch (error) {
+				if (state.sharedPlaybackActive) resetSharedSpeechOutput();
+				if ((error as Error)?.name !== "AbortError" && lifecycleEpoch === state.lifecycleEpoch) {
+					notify(ctx, `Talk confirmation failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				}
+			} finally {
+				if (state.speechAbort === controller) state.speechAbort = undefined;
+				if (
+					state.enabled
+					&& lifecycleEpoch === state.lifecycleEpoch
+					&& speechEpoch === state.speechEpoch
+				) {
+					state.sharedPlaybackActive = false;
+					state.playbackActive = false;
+					if (state.capture) setPhase("listening", ctx);
+					else if (state.inputEnabled) startCapture(ctx);
+					else setPhase("standby", ctx);
+				}
+			}
+		});
+		state.speechTail = task;
+		await task;
+		return completed;
+	}
+
 	async function beginAgentRun(systemPrompt: string, ctx: TalkContext): Promise<string | undefined> {
 		state.ctx = ctx;
 		state.runCounter += 1;
@@ -1185,6 +1262,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	return {
 		enable,
 		disable,
+		speakConfirmation,
 		setInputEnabled,
 		acquireInputPreemption,
 		setOutputEnabled,

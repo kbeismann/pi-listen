@@ -48,6 +48,7 @@ interface TalkHandoffMode {
 	isRequestedInputEnabled(): boolean;
 	isOutputEnabled(): boolean;
 	enable(ctx: ExtensionContext, options?: TalkEnableOptions): Promise<boolean>;
+	speakConfirmation?(text: string, ctx: ExtensionContext): Promise<boolean>;
 	disable(
 		ctx?: ExtensionContext,
 		options?: { notify?: boolean; awaitTranscription?: boolean },
@@ -248,6 +249,23 @@ function targetLabel(target: TalkTargetDescriptor): string {
 		? sanitizeText(target.latestUserText, 80)
 		: "";
 	return topic ? `${project}, about “${topic}”` : `${project} session`;
+}
+
+/** Build the target's fixed local acknowledgement without consulting a model. */
+export function talkHandoffConfirmationText(target: Pick<
+	TalkTargetDescriptor,
+	"aliases" | "cwd" | "name"
+>): string {
+	if (target.aliases.includes("relay")) return "You're now talking to Relay.";
+	const name = target.name
+		? sanitizeText(target.name, 100).replace(/[.!?]+$/, "")
+		: "";
+	if (name) return `You're now talking to ${name}.`;
+	const project = sanitizeText(path.basename(target.cwd), 80).replace(/[.!?]+$/, "");
+	if (project && project !== ".") {
+		return `You're now talking to the ${project} project session.`;
+	}
+	return "Talk is now active in this session.";
 }
 
 function normalized(value: string): string {
@@ -530,6 +548,21 @@ export function createTalkHandoffController(
 			? sanitizeText(request.sourceLabel, 160)
 			: "another Pi session";
 		if (context.hasUI) context.ui.notify(`Talk moved here from ${sourceLabel}.`, "info");
+		try {
+			const name = context.sessionManager.getSessionName();
+			await mode.speakConfirmation?.(talkHandoffConfirmationText({
+				aliases: aliases(),
+				cwd: context.cwd,
+				...(name ? { name } : {}),
+			}), context);
+		} catch (error) {
+			if (context.hasUI) {
+				context.ui.notify(
+					`Talk moved here, but its confirmation could not be spoken: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+			}
+		}
 	}
 
 	function respond(socket: Socket, response: TalkHandoffResponse): void {

@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and output gates, activate the target's local Talk prompt, and restore the
   source if activation fails. No daemon, heartbeat, Supervisor coupling,
   context transfer, or subagent is involved.
+- **Immediate local handoff acknowledgement** — after activation, a target with
+  Talk output enabled speaks a fixed confirmation derived from its Relay alias,
+  session name, project directory, or a generic fallback. No model turn or
+  conversation-context entry is created.
 
 ## [7.2.2] - 2026-05-01
 
