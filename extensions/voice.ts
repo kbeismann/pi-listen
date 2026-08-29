@@ -9,9 +9,9 @@
  *              ↑         │
  *              └─────────┘  (rapid re-press recovery)
  *
- *   warmup:     User holds SPACE for ≥ HOLD_THRESHOLD_MS (1200ms).
- *               A "keep holding…" hint with countdown is shown. If released before
- *               the threshold, a normal space character is typed (or "hold longer" hint shown).
+ *   warmup:     A deliberate SPACE hold has passed the 300ms intent delay but
+ *               not the configured recording threshold. Releasing during
+ *               warmup cancels voice activation.
  *
  *   recording:  SoX captures PCM → Deepgram WebSocket streaming.
  *               Live interim + final transcripts update the widget.
@@ -26,10 +26,10 @@
  *
  *   A) Kitty protocol (Ghostty on Linux, Kitty, WezTerm):
  *      True key-down/repeat/release events available.
- *      First SPACE press → enter warmup immediately (show countdown).
+ *      First SPACE press → start a hidden 300ms intent delay.
  *      Released < 300ms → tap → type a space.
- *      Released 300ms–2s → show "hold longer" hint.
- *      Held ≥ 1.2s → activate recording.
+ *      Held ≥ 300ms → enter warmup and begin pre-recording.
+ *      Held through the configured threshold → activate recording.
  *      True release event stops recording.
  *
  *   B) Non-Kitty (macOS Terminal, Ghostty on macOS):
@@ -37,8 +37,9 @@
  *      First SPACE press → record time, start release-detect timer (500ms).
  *      No more presses within 500ms → TAP → type a space.
  *      Rapid presses detected → user is HOLDING.
- *      After REPEAT_CONFIRM_COUNT (6) rapid presses → enter warmup.
- *      After HOLD_THRESHOLD_MS (1200ms) from first press → activate recording.
+ *      After both the 300ms intent delay and REPEAT_CONFIRM_COUNT (6) rapid
+ *      presses → enter warmup.
+ *      After the configured threshold from first press → activate recording.
  *      Gap > RELEASE_DETECT_MS (500ms) after RECORDING_GRACE_MS (800ms) → stop.
  *
  *   ENTERPRISE FALLBACKS
@@ -51,7 +52,7 @@
  *     from "no speech detected" with distinct user messages.
  *
  * Activation:
- *   - Hold SPACE (≥1200ms) → release to finalize
+ *   - Hold SPACE through the configured threshold → release to finalize
  *   - Configurable shortcut (default Ctrl+Shift+V) → toggle start/stop (always works)
 
  *
@@ -99,6 +100,10 @@ import { createTalkVoiceControlServer } from "./voice/talk-voice-control";
 import { createTalkSpeechOutput } from "./voice/talk-speech-output";
 import { createPipeWireEchoCancellation } from "./voice/pipewire-aec";
 import { createSherpaSpeechDetector, prepareSherpaVad } from "./voice/sherpa-vad";
+import {
+	HOLD_INTENT_DELAY_MS,
+	remainingHoldIntentDelay,
+} from "./voice/hold-intent";
 import {
 	formatVoiceStatus,
 	formatVoiceWidgetLine,
@@ -714,6 +719,7 @@ export default function (pi: ExtensionAPI) {
 	// Hold-to-talk state
 	let kittyReleaseDetected = false;
 	let spaceDownTime: number | null = null;
+	let holdIntentTimer: ReturnType<typeof setTimeout> | null = null;
 	let holdActivationTimer: ReturnType<typeof setTimeout> | null = null;
 	let spaceConsumed = false;        // True once threshold passed and recording started
 	let releaseDetectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -816,6 +822,41 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
+	/**
+	 * Keep the ready row stable for normal Space taps. The intent delay is part
+	 * of the configured activation threshold, so recording still starts at the
+	 * same total hold duration.
+	 */
+	function beginWarmupAfterIntentDelay(): void {
+		const holdStartedAt = spaceDownTime;
+		if (holdStartedAt === null || !holdConfirmed || voiceState !== "idle") return;
+
+		const enterWarmup = () => {
+			if (
+				spaceDownTime !== holdStartedAt ||
+				!holdConfirmed ||
+				voiceState !== "idle"
+			) return;
+			setVoiceState("warmup");
+			prepareWarmupDictationPreemption();
+		};
+		const remainingMs = remainingHoldIntentDelay(
+			holdStartedAt,
+			Date.now(),
+			getHoldThresholdMs(),
+		);
+		if (remainingMs === 0) {
+			enterWarmup();
+			return;
+		}
+
+		clearHoldIntentTimer();
+		holdIntentTimer = setTimeout(() => {
+			holdIntentTimer = null;
+			enterWarmup();
+		}, remainingMs);
+	}
+
 	function setVoiceState(newState: VoiceState, options: { render?: boolean } = {}) {
 		const prev = voiceState;
 		voiceState = newState;
@@ -829,6 +870,12 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ─── Cleanup helpers ─────────────────────────────────────────────────────
+	function clearHoldIntentTimer() {
+		if (holdIntentTimer) {
+			clearTimeout(holdIntentTimer);
+			holdIntentTimer = null;
+		}
+	}
 
 	function clearHoldTimer() {
 		if (holdActivationTimer) {
@@ -850,6 +897,7 @@ export default function (pi: ExtensionAPI) {
 		spaceDownTime = null;
 		spacePressCount = 0;
 		holdConfirmed = false;
+		clearHoldIntentTimer();
 		clearHoldTimer();
 		clearReleaseTimer();
 		abortPreRecording();
@@ -884,7 +932,7 @@ export default function (pi: ExtensionAPI) {
 			activeSession = null;
 		}
 
-		resetHoldState(); // includes clearHoldTimer + clearReleaseTimer
+		resetHoldState(); // includes intent, activation, and release timers
 		_startingRecording = false;
 		lastSpacePressTime = 0;
 		lastNonSpaceKeyTime = 0;
@@ -1311,9 +1359,9 @@ export default function (pi: ExtensionAPI) {
 	//
 	// A) KITTY PROTOCOL (Ghostty on Linux, Kitty, WezTerm, etc.):
 	//    True key-down/repeat/release events. On first SPACE press,
-	//    immediately enter warmup (show countdown). If released before
-	//    HOLD_THRESHOLD_MS → cancel warmup, type a space. If held past
-	//    threshold → start recording. True release event stops recording.
+	//    wait through the intent delay before entering warmup. If released
+	//    before warmup, type a space. If held past HOLD_THRESHOLD_MS, start
+	//    recording. True release event stops recording.
 	//    No timer-based release detection needed.
 	//
 	// B) NON-KITTY (macOS Terminal, Ghostty on macOS, etc.):
@@ -1322,9 +1370,9 @@ export default function (pi: ExtensionAPI) {
 	//    Algorithm:
 	//      1. First SPACE press → record time, start release-detect timer.
 	//      2. No more presses within RELEASE_DETECT_MS (500ms) → TAP → type space.
-	//      3. Rapid presses arrive → user is HOLDING. After REPEAT_CONFIRM_COUNT
-	//         rapid presses → enter warmup, show countdown.
-	//      4. After HOLD_THRESHOLD_MS (1200ms) from first press → start recording.
+	//      3. Rapid presses arrive → user is HOLDING. After both the intent delay
+	//         and REPEAT_CONFIRM_COUNT rapid presses → enter warmup.
+	//      4. After HOLD_THRESHOLD_MS from first press → start recording.
 	//      5. Recording continues while key-repeat events arrive.
 	//         Gap > RELEASE_DETECT_MS after RECORDING_GRACE_MS → stop.
 	//
@@ -1334,6 +1382,13 @@ export default function (pi: ExtensionAPI) {
 	function onSpaceReleaseDetected() {
 		releaseDetectTimer = null;
 		voiceDebug("onSpaceReleaseDetected", { voiceState, holdConfirmed, spaceConsumed, spaceDownTime, spacePressCount, timeSinceRecStart: spaceConsumed ? Date.now() - recordingStartedAt : null });
+
+		// Repeat-based terminals already passed the first Space through to the
+		// editor. Releasing before the intent delay needs only to cancel timers.
+		if (holdConfirmed && voiceState === "idle" && spaceDownTime !== null) {
+			resetHoldState();
+			return;
+		}
 
 		// If we never confirmed this was a hold (< REPEAT_CONFIRM_COUNT rapid presses),
 		// then it was a TAP → space already passed through naturally (not consumed)
@@ -1470,15 +1525,23 @@ export default function (pi: ExtensionAPI) {
 					kittyReleaseDetected = true;
 					clearReleaseTimer();
 
+					// Kitty consumed the initial key-down. Restore a normal Space
+					// when release arrives before the delayed warmup becomes visible.
+					if (voiceState === "idle" && holdConfirmed && spaceDownTime !== null) {
+						resetHoldState();
+						if (ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
+						return { consume: true };
+					}
+
 					// Released during warmup → cancel
-					// If released very quickly (< 300ms), it was a tap → type a space
-					// If released after 300ms+, user was trying voice → show hint
+					// If a shorter custom activation threshold exposed warmup before
+					// the standard intent delay, preserve quick-tap behavior.
 					if (voiceState === "warmup") {
 						const holdDuration = spaceDownTime ? Date.now() - spaceDownTime : 0;
 						resetHoldState();
 						abortPreRecording();
 						setVoiceState("idle");
-						if (holdDuration < 300) {
+						if (holdDuration < HOLD_INTENT_DELAY_MS) {
 							// Quick tap — just type a space
 							if (ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
 						} else {
@@ -1488,8 +1551,8 @@ export default function (pi: ExtensionAPI) {
 						return { consume: true };
 					}
 
-					// Tap: released before warmup even started (shouldn't happen in
-					// Kitty path since we enter warmup on first press, but handle anyway)
+					// A release event can first reveal Kitty support after the initial
+					// press took the repeat-based fallback path.
 					if (spaceDownTime && !holdConfirmed && voiceState === "idle") {
 						resetHoldState();
 						if (ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
@@ -1534,11 +1597,11 @@ export default function (pi: ExtensionAPI) {
 						spacePressCount++;
 						lastSpacePressTime = now;
 
-						// Enough repeats to confirm hold — enter warmup
+						// Enough repeats confirm intent, but warmup remains hidden until
+						// the minimum intent delay has also elapsed.
 						if (spacePressCount >= REPEAT_CONFIRM_COUNT) {
 							holdConfirmed = true;
-							setVoiceState("warmup");
-							prepareWarmupDictationPreemption();
+							beginWarmupAfterIntentDelay();
 
 							const alreadyElapsed = now - (spaceDownTime || now);
 							const remaining = Math.max(0, getHoldThresholdMs() - alreadyElapsed);
@@ -1591,8 +1654,8 @@ export default function (pi: ExtensionAPI) {
 				//    Press fires ONCE on key-down. Repeats come as isKeyRepeat().
 				//    Release comes as isKeyRelease(). NO timer-based release detection
 				//    needed — the true release event handles everything.
-				//    On first press: enter warmup immediately and start hold timer.
-				//    (No need to wait for repeats to confirm hold.)
+				//    On first press: start the intent and activation timers. Warmup
+				//    appears only if the key remains down through the intent delay.
 				//
 				// B) Non-Kitty (macOS Terminal, etc.):
 				//    Holding a key sends rapid "press" events (~30-90ms apart).
@@ -1644,8 +1707,8 @@ export default function (pi: ExtensionAPI) {
 				// PATH A: Kitty protocol — true key events available
 				// ──────────────────────────────────────────────────────────
 				if (kittyReleaseDetected) {
-					// First press → immediately enter warmup (release event
-					// will cancel if it was a tap)
+					// First press → keep the ready row visible through the intent
+					// delay; the release event restores quick taps as ordinary spaces.
 					if (voiceState === "idle") {
 						spaceDownTime = Date.now();
 						spaceConsumed = false;
@@ -1653,8 +1716,7 @@ export default function (pi: ExtensionAPI) {
 						lastSpacePressTime = Date.now();
 						holdConfirmed = true; // Kitty: trust the press, release cancels
 
-						setVoiceState("warmup");
-						prepareWarmupDictationPreemption();
+						beginWarmupAfterIntentDelay();
 
 						holdActivationTimer = setTimeout(() => {
 							holdActivationTimer = null;
@@ -1703,8 +1765,7 @@ export default function (pi: ExtensionAPI) {
 
 						if (spacePressCount >= REPEAT_CONFIRM_COUNT && !holdConfirmed) {
 							holdConfirmed = true;
-							setVoiceState("warmup");
-							prepareWarmupDictationPreemption();
+							beginWarmupAfterIntentDelay();
 
 							const alreadyElapsed = now - spaceDownTime;
 							const remaining = Math.max(0, getHoldThresholdMs() - alreadyElapsed);
@@ -1782,8 +1843,8 @@ export default function (pi: ExtensionAPI) {
 				return undefined;
 			}
 
-			// ── Any other key pressed → cancel potential hold ──
-			if (spaceDownTime && !holdConfirmed && voiceState === "idle") {
+			// ── Any other key pressed → cancel unexposed or unconfirmed intent ──
+			if (spaceDownTime && voiceState === "idle") {
 				resetHoldState();
 				// No need to insert a space manually — the first space press was
 				// already allowed to pass through to the focused UI component.

@@ -129,13 +129,13 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 | Action | Key | Notes |
 |--------|-----|-------|
-| **Record to editor** | Hold `SPACE` (≥1.2s) | Release to finalize. Pre-records during warmup so you don't miss words. |
+| **Record to editor** | Hold `SPACE` through the configured delay (700ms default) | Warmup appears after a 300ms intent delay. Release to finalize. |
 | **Toggle recording** | `Ctrl+Shift+V` | Works in all terminals — press to start, press again to stop. |
 | **Clear editor** | `Escape` × 2 | Double-tap within 500ms to clear all text. |
 
 ### How recording works
 
-1. **Hold SPACE** — warmup countdown appears, audio capture starts immediately (pre-recording)
+1. **Hold SPACE** — after a 300ms intent delay, warmup appears and audio capture starts (pre-recording)
 2. **Keep holding** — live transcription streams into the editor (Deepgram) or audio buffers (local)
 3. **Release SPACE** — recording continues for 1.5s (tail recording) to catch your last word, then finalizes
 4. Text appears in the editor, ready to send
@@ -321,7 +321,7 @@ Models from [Handy](https://github.com/cjpais/handy) (`~/Library/Application Sup
 | **Enterprise download pipeline** | Pre-checks (disk, network, permissions), live progress with speed/ETA, post-verification |
 | **Handy integration** | Auto-detects models from Handy app, imports via symlink |
 | **Audio fallback chain** | Tries sox, ffmpeg, arecord in order |
-| **Pre-recording** | Audio capture starts during warmup — you never miss the first word |
+| **Pre-recording** | Audio capture starts after the intent delay, during warmup, so ordinary Space taps never open the microphone |
 | **Tail recording** | Keeps recording 1.5s after release so your last word isn't clipped |
 | **Live streaming** | Deepgram Nova 3 WebSocket — interim transcripts as you speak |
 | **56+ languages** | Deepgram: 56+ with live streaming. Local: up to 57 depending on model. |
