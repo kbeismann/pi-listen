@@ -199,9 +199,13 @@ only after its spoken response drains, the target starts its own local Talk
 controller with the same input and output gate settings, and the source restores
 Talk if activation fails. A target that is already processing a turn remains a
 valid destination: Talk waits for that work to settle instead of interrupting
-it or requiring the user to repeat the handoff request. With output enabled,
-the target immediately speaks a fixed local acknowledgement using its Relay
-alias, session name, project directory, or a generic fallback. That
+it or requiring the user to repeat the handoff request. Once the target
+authorizes the transfer, it publishes a local read-only pending phase before
+the source releases Talk. Cooperating target integrations may use that signal
+to defer their own lower-priority background work, but the signal grants no
+authority to interrupt direct user work. With output enabled, the target
+immediately speaks a fixed local acknowledgement using its Relay alias, session
+name, project directory, or a generic fallback. That
 acknowledgement does not invoke a model or enter conversation context. The
 target's next turn receives its own Talk prompt, so prompt responsibility moves
 without copying prompt text between sessions.

@@ -6,11 +6,14 @@ import { SessionManager } from "@mariozechner/pi-coding-agent";
 import {
 	createTalkHandoffController,
 	talkHandoffConfirmationText,
+	TALK_HANDOFF_STATE_CHANNEL,
 	TALK_TARGET_SERVICE_CHANNEL,
 	TALK_TARGET_SERVICE_PROTOCOL,
 	TALK_TO_RELAY_TOOL_NAME,
 	TALK_TO_SESSION_TOOL_NAME,
+	type TalkHandoffDiagnosticEvent,
 	type TalkHandoffController,
+	type TalkHandoffStateSnapshot,
 	type TalkTargetRegistrationService,
 } from "../extensions/voice/talk-handoff";
 
@@ -46,6 +49,8 @@ interface SessionHarness {
 	pi: FakePi;
 	context: ReturnType<typeof makeContext>;
 	controller: TalkHandoffController;
+	diagnostics: TalkHandoffDiagnosticEvent[];
+	handoffStates: TalkHandoffStateSnapshot[];
 	mode: {
 		enabled: boolean;
 		inputEnabled: boolean;
@@ -110,6 +115,11 @@ function makeSession(
 ): SessionHarness {
 	const pi = new FakePi();
 	const context = makeContext(options);
+	const diagnostics: TalkHandoffDiagnosticEvent[] = [];
+	const handoffStates: TalkHandoffStateSnapshot[] = [];
+	pi.events.on(TALK_HANDOFF_STATE_CHANNEL, (value) => {
+		handoffStates.push(value as TalkHandoffStateSnapshot);
+	});
 	let controller: TalkHandoffController;
 	const mode = {
 		enabled: false,
@@ -147,8 +157,9 @@ function makeSession(
 		runtimeDirectory,
 		requestTimeoutMs: 500,
 		activationTimeoutMs: 2_000,
+		onDiagnostic: (event) => diagnostics.push(event),
 	});
-	return { pi, context, controller, mode };
+	return { pi, context, controller, diagnostics, handoffStates, mode };
 }
 
 async function makeRuntimeDirectory(): Promise<string> {
@@ -307,6 +318,10 @@ describe("Talk session handoff", () => {
 			});
 			targetService!.registerAlias("relay");
 			await source.mode.enable(source.context);
+			const sourceEnabledAtTargetState: boolean[] = [];
+			relay.pi.events.on(TALK_HANDOFF_STATE_CHANNEL, () => {
+				sourceEnabledAtTargetState.push(source.mode.enabled);
+			});
 
 			const result = await source.pi.tools.get(TALK_TO_RELAY_TOOL_NAME).execute(
 				"busy-relay",
@@ -321,10 +336,39 @@ describe("Talk session handoff", () => {
 			const completion = source.controller.completePendingHandoff();
 			await waitUntil(() => !source.mode.enabled);
 			expect(relay.mode.enabled).toBe(false);
+			expect(relay.handoffStates.map(({ phase }) => phase)).toEqual([
+				"prepared",
+				"waiting-for-idle",
+			]);
+			expect(sourceEnabledAtTargetState[0]).toBe(true);
+			expect(relay.handoffStates.every(({ pending }) => pending)).toBe(true);
+			expect(relay.diagnostics.map(({ stage }) => stage)).toEqual([
+				"target-prepared",
+				"target-waiting",
+			]);
 
 			relay.context.setIdle(true);
 			await completion;
 			expect(relay.mode.enabled).toBe(true);
+			expect(relay.handoffStates.map(({ phase }) => phase)).toEqual([
+				"prepared",
+				"waiting-for-idle",
+				"activating",
+				"idle",
+			]);
+			expect(relay.handoffStates.at(-1)?.pending).toBe(false);
+			expect(relay.diagnostics.map(({ stage }) => stage)).toEqual([
+				"target-prepared",
+				"target-waiting",
+				"target-ready",
+				"target-activated",
+			]);
+			expect(source.diagnostics.map(({ stage }) => stage)).toEqual([
+				"queued",
+				"source-ready",
+				"source-released",
+				"completed",
+			]);
 			expect(source.context.notifications.at(-1)?.message).toContain("Talk moved to Relay");
 		} finally {
 			await stopSessions(source, relay);

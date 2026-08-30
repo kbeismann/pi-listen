@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Handoffs to active targets** — a live target remains selectable while it is
   processing a turn. Talk waits for the target to settle without preempting its
   work instead of rejecting the request and asking the user to try again.
+- **Priority-aware target readiness** — an authorized target publishes a local,
+  read-only pending-handoff phase before the source releases Talk. Cooperating
+  integrations can defer their own lower-priority background work while Talk
+  continues to wait for direct user work without preempting it.
 
 ### Added
 

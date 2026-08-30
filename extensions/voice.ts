@@ -3211,6 +3211,7 @@ export default function (pi: ExtensionAPI) {
 	talkHandoff = createTalkHandoffController(pi, continuousTalk, {
 		onTransferred: () => talkMutedStartup?.suppress(),
 		onError: (message) => voiceDebug("Talk handoff error", { message }),
+		onDiagnostic: (event) => voiceDebug("Talk handoff", event),
 	});
 	const talkIntegration = installTalkIntegration(
 		pi,

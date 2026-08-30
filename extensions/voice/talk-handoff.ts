@@ -24,6 +24,8 @@ export const TALK_TO_RELAY_TOOL_NAME = "talk_to_relay";
 export const TALK_TO_SESSION_TOOL_NAME = "talk_to_session";
 export const TALK_TARGET_SERVICE_CHANNEL = "pi-listen:talk-target-service:v1";
 export const TALK_TARGET_SERVICE_PROTOCOL = "pi-listen.talk-target-service/v1";
+export const TALK_HANDOFF_STATE_CHANNEL = "pi-listen:talk-handoff-state:v1";
+export const TALK_HANDOFF_STATE_PROTOCOL = "pi-listen.talk-handoff-state/v1";
 
 const HANDOFF_PROTOCOL = "pi-listen.talk-handoff/v1";
 const OWNER_LINK_NAME = "owner";
@@ -106,13 +108,46 @@ type TalkHandoffResponse =
 interface PendingHandoff {
 	target: TalkTargetDescriptor;
 	label: string;
+	queuedAt: number;
 	authorizationNonce?: string;
 }
 
 interface PreparedActivation {
 	nonce: string;
 	sourceEndpoint: string;
+	preparedAt: number;
 	expiresAt: number;
+}
+
+export type TalkHandoffTargetPhase =
+	| "idle"
+	| "prepared"
+	| "waiting-for-idle"
+	| "activating";
+
+/** Read-only local state for integrations that can defer lower-priority work. */
+export interface TalkHandoffStateSnapshot {
+	protocol: typeof TALK_HANDOFF_STATE_PROTOCOL;
+	pending: boolean;
+	phase: TalkHandoffTargetPhase;
+}
+
+export type TalkHandoffDiagnosticStage =
+	| "queued"
+	| "source-ready"
+	| "source-released"
+	| "target-prepared"
+	| "target-waiting"
+	| "target-ready"
+	| "target-activated"
+	| "completed"
+	| "failed"
+	| "expired";
+
+export interface TalkHandoffDiagnosticEvent {
+	stage: TalkHandoffDiagnosticStage;
+	elapsedMs: number;
+	waitedForTargetIdle?: boolean;
 }
 
 interface SocketIdentity {
@@ -127,6 +162,7 @@ export interface TalkHandoffOptions {
 	targetIdleTimeoutMs?: number;
 	onTransferred?: () => void;
 	onError?: (message: string) => void;
+	onDiagnostic?: (event: TalkHandoffDiagnosticEvent) => void;
 }
 
 export interface TalkHandoffController {
@@ -418,7 +454,60 @@ export function createTalkHandoffController(
 	let context: ExtensionContext | undefined;
 	let pendingHandoff: PendingHandoff | undefined;
 	let preparedActivation: PreparedActivation | undefined;
+	let preparedActivationTimer: ReturnType<typeof setTimeout> | undefined;
+	let targetHandoffPhase: TalkHandoffTargetPhase = "idle";
 	let activationTail = Promise.resolve();
+
+	function reportDiagnostic(
+		stage: TalkHandoffDiagnosticStage,
+		startedAt: number,
+		details: Pick<TalkHandoffDiagnosticEvent, "waitedForTargetIdle"> = {},
+	): void {
+		try {
+			options.onDiagnostic?.({
+				stage,
+				elapsedMs: Math.max(0, Date.now() - startedAt),
+				...details,
+			});
+		} catch {
+			// Diagnostics must never alter ownership or recovery behavior.
+		}
+	}
+
+	function publishTargetHandoffPhase(phase: TalkHandoffTargetPhase): void {
+		if (targetHandoffPhase === phase) return;
+		targetHandoffPhase = phase;
+		const snapshot: TalkHandoffStateSnapshot = {
+			protocol: TALK_HANDOFF_STATE_PROTOCOL,
+			pending: phase !== "idle",
+			phase,
+		};
+		pi.events.emit(TALK_HANDOFF_STATE_CHANNEL, snapshot);
+	}
+
+	function clearPreparedActivationTimer(): void {
+		if (preparedActivationTimer) clearTimeout(preparedActivationTimer);
+		preparedActivationTimer = undefined;
+	}
+
+	function expirePreparedActivation(prepared: PreparedActivation): void {
+		if (preparedActivation !== prepared) return;
+		preparedActivation = undefined;
+		preparedActivationTimer = undefined;
+		publishTargetHandoffPhase("idle");
+		reportDiagnostic("expired", prepared.preparedAt);
+	}
+
+	function retainPreparedActivation(prepared: PreparedActivation): void {
+		clearPreparedActivationTimer();
+		preparedActivation = prepared;
+		publishTargetHandoffPhase("prepared");
+		preparedActivationTimer = setTimeout(
+			() => expirePreparedActivation(prepared),
+			Math.max(0, prepared.expiresAt - Date.now()),
+		);
+		preparedActivationTimer.unref();
+	}
 
 	function aliases(): string[] {
 		return [...aliasOwners.entries()]
@@ -513,11 +602,15 @@ export function createTalkHandoffController(
 			requestTimeoutMs,
 		);
 		if (!authorization.ok) throw new Error(authorization.error);
-		preparedActivation = {
+		const preparedAt = Date.now();
+		const prepared = {
 			nonce,
 			sourceEndpoint: request.sourceEndpoint,
-			expiresAt: Date.now() + PREPARED_ACTIVATION_TTL_MS,
+			preparedAt,
+			expiresAt: preparedAt + PREPARED_ACTIVATION_TTL_MS,
 		};
+		retainPreparedActivation(prepared);
+		reportDiagnostic("target-prepared", preparedAt);
 	}
 
 	async function authorizeHandoff(request: TalkHandoffRequest): Promise<void> {
@@ -567,56 +660,78 @@ export function createTalkHandoffController(
 		const targetEndpoint = endpointName;
 		const prepared = preparedActivation;
 		preparedActivation = undefined;
+		clearPreparedActivationTimer();
 		if (
 			!prepared
 			|| prepared.expiresAt < Date.now()
 			|| request.nonce !== prepared.nonce
 			|| request.sourceEndpoint !== prepared.sourceEndpoint
 		) {
+			publishTargetHandoffPhase("idle");
 			throw new Error("The Talk handoff was not prepared by its current owner.");
 		}
-		if (await ownerTarget() !== undefined) {
-			throw new Error("The current Talk owner has not released the lease.");
-		}
-		if (mode.isEnabled()) throw new Error("Talk is already active in the target session.");
-		if (typeof request.inputEnabled !== "boolean" || typeof request.outputEnabled !== "boolean") {
-			throw new Error("The Talk handoff did not include valid input and output gates.");
-		}
-		// A direct handoff request must survive an overlapping target turn without
-		// preempting it. The source has released Talk by this point, so wait for the
-		// target's current work to settle before starting its local controller.
-		await waitForTargetIdle(targetContext, targetEndpoint, socket);
-		if (context !== targetContext || endpointName !== targetEndpoint) {
-			throw new Error("The target Pi session is no longer available.");
-		}
-		if (await ownerTarget() !== undefined) {
-			throw new Error("Another Pi session claimed Talk while the target was busy.");
-		}
-		if (mode.isEnabled()) throw new Error("Talk is already active in the target session.");
-		const enabled = await mode.enable(targetContext, {
-			inputEnabled: request.inputEnabled,
-			outputEnabled: request.outputEnabled,
-			notify: false,
-		});
-		if (!enabled || !mode.isEnabled()) throw new Error("The target Pi session could not start Talk.");
-		const sourceLabel = typeof request.sourceLabel === "string"
-			? sanitizeText(request.sourceLabel, 160)
-			: "another Pi session";
-		if (targetContext.hasUI) targetContext.ui.notify(`Talk moved here from ${sourceLabel}.`, "info");
 		try {
-			const name = targetContext.sessionManager.getSessionName();
-			await mode.speakConfirmation?.(talkHandoffConfirmationText({
-				aliases: aliases(),
-				cwd: targetContext.cwd,
-				...(name ? { name } : {}),
-			}), targetContext);
-		} catch (error) {
-			if (targetContext.hasUI) {
-				targetContext.ui.notify(
-					`Talk moved here, but its confirmation could not be spoken: ${error instanceof Error ? error.message : String(error)}`,
-					"warning",
-				);
+			if (await ownerTarget() !== undefined) {
+				throw new Error("The current Talk owner has not released the lease.");
 			}
+			if (mode.isEnabled()) throw new Error("Talk is already active in the target session.");
+			if (typeof request.inputEnabled !== "boolean" || typeof request.outputEnabled !== "boolean") {
+				throw new Error("The Talk handoff did not include valid input and output gates.");
+			}
+			const waitedForTargetIdle = !targetContext.isIdle();
+			if (waitedForTargetIdle) {
+				publishTargetHandoffPhase("waiting-for-idle");
+				reportDiagnostic("target-waiting", prepared.preparedAt, {
+					waitedForTargetIdle: true,
+				});
+			} else {
+				publishTargetHandoffPhase("activating");
+			}
+			// A direct handoff request must survive an overlapping target turn without
+			// preempting user work. The read-only pending state lets cooperating
+			// integrations defer their own lower-priority background work first.
+			await waitForTargetIdle(targetContext, targetEndpoint, socket);
+			reportDiagnostic("target-ready", prepared.preparedAt, {
+				waitedForTargetIdle,
+			});
+			publishTargetHandoffPhase("activating");
+			if (context !== targetContext || endpointName !== targetEndpoint) {
+				throw new Error("The target Pi session is no longer available.");
+			}
+			if (await ownerTarget() !== undefined) {
+				throw new Error("Another Pi session claimed Talk while the target was busy.");
+			}
+			if (mode.isEnabled()) throw new Error("Talk is already active in the target session.");
+			const enabled = await mode.enable(targetContext, {
+				inputEnabled: request.inputEnabled,
+				outputEnabled: request.outputEnabled,
+				notify: false,
+			});
+			if (!enabled || !mode.isEnabled()) throw new Error("The target Pi session could not start Talk.");
+			reportDiagnostic("target-activated", prepared.preparedAt, {
+				waitedForTargetIdle,
+			});
+			const sourceLabel = typeof request.sourceLabel === "string"
+				? sanitizeText(request.sourceLabel, 160)
+				: "another Pi session";
+			if (targetContext.hasUI) targetContext.ui.notify(`Talk moved here from ${sourceLabel}.`, "info");
+			try {
+				const name = targetContext.sessionManager.getSessionName();
+				await mode.speakConfirmation?.(talkHandoffConfirmationText({
+					aliases: aliases(),
+					cwd: targetContext.cwd,
+					...(name ? { name } : {}),
+				}), targetContext);
+			} catch (error) {
+				if (targetContext.hasUI) {
+					targetContext.ui.notify(
+						`Talk moved here, but its confirmation could not be spoken: ${error instanceof Error ? error.message : String(error)}`,
+						"warning",
+					);
+				}
+			}
+		} finally {
+			publishTargetHandoffPhase("idle");
 		}
 	}
 
@@ -797,7 +912,9 @@ export function createTalkHandoffController(
 		const label = targetLabel(target);
 		if (target.endpoint === endpointName) return `Talk is already in ${label}.`;
 		if (target.talkEnabled || target.ownsTalk) throw new Error(`${label} already owns Talk.`);
-		pendingHandoff = { target, label };
+		const queuedAt = Date.now();
+		pendingHandoff = { target, label, queuedAt };
+		reportDiagnostic("queued", queuedAt);
 		return `Talk handoff queued for ${label}. The current spoken response and any active target turn will finish before Talk moves.`;
 	}
 
@@ -923,6 +1040,8 @@ export function createTalkHandoffController(
 		async stop(): Promise<void> {
 			pendingHandoff = undefined;
 			preparedActivation = undefined;
+			clearPreparedActivationTimer();
+			publishTargetHandoffPhase("idle");
 			await this.releaseOwnership();
 			const activeServer = server;
 			server = undefined;
@@ -976,6 +1095,7 @@ export function createTalkHandoffController(
 		async completePendingHandoff(): Promise<void> {
 			const handoff = pendingHandoff;
 			if (!handoff) return;
+			reportDiagnostic("source-ready", handoff.queuedAt);
 			const sourceContext = context;
 			if (!sourceContext || !mode.isEnabled() || !await isOwner()) {
 				pendingHandoff = undefined;
@@ -1008,6 +1128,7 @@ export function createTalkHandoffController(
 				await mode.disable(sourceContext, { notify: false });
 				sourceDisabled = !mode.isEnabled();
 				if (!sourceDisabled) throw new Error("The source Pi session could not release Talk.");
+				reportDiagnostic("source-released", handoff.queuedAt);
 				const response = await requestEndpoint(
 					path.join(runtimeDirectory, handoff.target.endpoint),
 					{
@@ -1022,10 +1143,12 @@ export function createTalkHandoffController(
 					activationTimeoutMs + targetIdleTimeoutMs,
 				);
 				if (!response.ok) throw new Error(response.error);
+				reportDiagnostic("completed", handoff.queuedAt);
 				options.onTransferred?.();
 				if (sourceContext.hasUI) sourceContext.ui.notify(`Talk moved to ${handoff.label}.`, "info");
 			} catch (error) {
 				pendingHandoff = undefined;
+				reportDiagnostic("failed", handoff.queuedAt);
 				let restored = mode.isEnabled();
 				if (sourceDisabled && !restored) {
 					restored = await mode.enable(sourceContext, {
