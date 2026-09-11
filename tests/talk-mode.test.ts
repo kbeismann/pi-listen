@@ -5,7 +5,6 @@ import { DEFAULT_CONFIG, type VoiceConfig } from "../extensions/voice/config";
 import type { TalkAudioRoute } from "../extensions/voice/pipewire-aec";
 import {
 	createTalkMode,
-	GEMINI_TALK_STREAM_BATCH_MIN_CHARS,
 	TALK_SYSTEM_PROMPT,
 	type TalkCapture,
 	type TalkModeDependencies,
@@ -506,7 +505,7 @@ describe("continuous talk mode", () => {
 		expect(mode.getPhase()).toBe("off");
 	});
 
-	test("drains shared playback once after every streamed fragment is heard", async () => {
+	test("keeps streaming completed local speech fragments before message end", async () => {
 		let finishCount = 0;
 		let queuedCount = 0;
 		const harness = makeHarness({
@@ -536,7 +535,7 @@ describe("continuous talk mode", () => {
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
-	test("coalesces streamed Gemini sentences into fewer remote requests", async () => {
+	test("queues one Gemini request only after the assistant message ends", async () => {
 		const harness = makeHarness();
 		harness.config.talk.ttsBackend = "gemini";
 		await harness.mode.enable(harness.context as any);
@@ -545,34 +544,25 @@ describe("continuous talk mode", () => {
 			"The first remote sentence contains enough context to make the spoken comparison useful and natural.",
 			"The second remote sentence continues the thought without starting another tiny Gemini request.",
 			"The third remote sentence completes a batch that gives playback enough audio to absorb network jitter.",
-			"The fourth remote sentence remains buffered until the final message event flushes the response.",
+			"The fourth remote sentence remains buffered until the final message event flushes the response." +
+				" Detailed context remains part of the same completed answer.".repeat(35),
 		];
 		let accumulatedText = "";
-		for (const sentence of sentences.slice(0, 2)) {
+		for (const sentence of sentences) {
 			accumulatedText += `${accumulatedText ? " " : ""}${sentence}`;
 			harness.mode.handleMessageUpdate({
 				message: { id: "gemini-answer", role: "assistant", content: [{ type: "text", text: accumulatedText }] },
 			});
+			await Bun.sleep(0);
+			expect(harness.spoken).toEqual([]);
 		}
-		await Bun.sleep(0);
-		expect(harness.spoken).toEqual([]);
-
-		accumulatedText += ` ${sentences[2]}`;
-		harness.mode.handleMessageUpdate({
-			message: { id: "gemini-answer", role: "assistant", content: [{ type: "text", text: accumulatedText }] },
-		});
-		await Bun.sleep(0);
-		expect(harness.spoken).toHaveLength(1);
-		expect(harness.spoken[0]!.length).toBeGreaterThanOrEqual(GEMINI_TALK_STREAM_BATCH_MIN_CHARS);
-
-		accumulatedText += ` ${sentences[3]}`;
 		harness.mode.handleMessageEnd({
 			message: { id: "gemini-answer", role: "assistant", content: [{ type: "text", text: accumulatedText }] },
 		});
 		await harness.mode.handleAgentSettled();
 
-		expect(harness.spoken).toHaveLength(2);
-		expect(harness.spoken.join(" ")).toBe(accumulatedText);
+		expect(accumulatedText.length).toBeGreaterThan(2_000);
+		expect(harness.spoken).toEqual([accumulatedText]);
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 
