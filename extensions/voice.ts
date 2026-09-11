@@ -3084,9 +3084,9 @@ export default function (pi: ExtensionAPI) {
 	// ─── Hands-free /talk mode ─────────────────────────────────────────────
 	//
 	// /talk deliberately uses an audio path separate from hold-to-talk. It
-	// always selects the configured local STT and TTS models. Optional PipeWire
-	// routing and local gate control exist only for the /talk lifecycle and are
-	// removed when the mode stops.
+	// always keeps STT local, while TTS can use either a local model or Gemini.
+	// Optional PipeWire routing and local gate control exist only for the /talk
+	// lifecycle and are removed when the mode stops.
 	let publishTalkState = (): void => {};
 	const talkSpeechOutput = createTalkSpeechOutput();
 	let talkVoiceControl: ReturnType<typeof createTalkVoiceControlServer> | null = null;
@@ -3132,6 +3132,12 @@ export default function (pi: ExtensionAPI) {
 			return createPipeWireEchoCancellation({ signal });
 		},
 		prepare: async (voiceConfig, signal) => {
+			const useGeminiTts = voiceConfig.talk.ttsBackend === "gemini";
+			if (useGeminiTts) {
+				const { requireGeminiApiKey } = await import("./voice/tts-gemini");
+				requireGeminiApiKey();
+			}
+
 			const sttConfig: VoiceConfig = {
 				...voiceConfig,
 				backend: "local",
@@ -3142,6 +3148,8 @@ export default function (pi: ExtensionAPI) {
 			if (signal.aborted) throw new DOMException("Talk setup aborted", "AbortError");
 			await prepareSherpaVad(signal);
 			if (signal.aborted) throw new DOMException("Talk setup aborted", "AbortError");
+
+			if (useGeminiTts) return;
 
 			const { ensureTtsModelInstalled, getInstalledTtsModelDir, getTtsModel } = await import("./voice/tts-local-models");
 			const { warmupTts } = await import("./voice/tts-engine");

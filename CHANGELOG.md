@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gemini Talk speech output** — Talk can keep Parakeet transcription local
+  while streaming assistant text through the Gemini Developer API
+  `streamGenerateContent` endpoint. Multi-sentence request batching avoids
+  sentence-level quota amplification, and a bounded startup PCM buffer absorbs
+  request and network jitter before audio reaches the player. The API key stays
+  in `GEMINI_API_KEY` or the `generativelanguage.googleapis.com` entry in
+  `~/.authinfo`; it is never persisted in voice settings.
+- **Longer Talk barge-in confirmation** — `bargeIn.minSpeechMs` accepts up to
+  3000 ms so headphone users can prefer fewer false interruptions over the
+  fastest possible voice interruption.
 - **Natural Talk handoff between live Pi sessions** — only the current Talk
   owner can queue `talk_to_relay` or `talk_to_session`. The latter resolves a
   natural description against bounded live session metadata on demand and asks

@@ -107,6 +107,7 @@ interface UtteranceInterruption {
 const INTERRUPTION_ENTRY_TYPE = "pi-listen-talk-interruption";
 const INTERRUPTED_AFTER_SPEECH = "[The user interrupted here; the remainder of the generated response was not heard.]";
 const INTERRUPTED_BEFORE_SPEECH = "[The user interrupted before any of this response was heard.]";
+export const GEMINI_TALK_STREAM_BATCH_MIN_CHARS = 240;
 const NON_INTERRUPTING_TALK_WORDS = new Set([
 	"ah", "er", "erm", "hm", "hmm", "huh", "mhm", "mm", "oh", "okay", "ok", "right", "sure", "uh", "um", "yeah", "yep", "yes",
 ]);
@@ -1118,7 +1119,16 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		if (isFinal) speakLength = newText.length;
 		else {
 			const sentenceEnd = lastSentenceEnd(newText);
-			if (sentenceEnd > 0) speakLength = sentenceEnd;
+			if (state.config?.talk.ttsBackend === "gemini") {
+				// Every remote fragment has its own request setup delay and quota
+				// cost. Wait for several sentences before enqueueing Gemini while
+				// retaining the final-event flush for short responses.
+				if (sentenceEnd >= GEMINI_TALK_STREAM_BATCH_MIN_CHARS) speakLength = sentenceEnd;
+				else if (newText.length >= GEMINI_TALK_STREAM_BATCH_MIN_CHARS) {
+					const clauseEnd = lastClauseEnd(newText);
+					if (clauseEnd >= GEMINI_TALK_STREAM_BATCH_MIN_CHARS) speakLength = clauseEnd;
+				}
+			} else if (sentenceEnd > 0) speakLength = sentenceEnd;
 			else if (newText.length >= 100) speakLength = Math.max(0, lastClauseEnd(newText));
 		}
 		if (speakLength <= 0) return;
@@ -1247,13 +1257,16 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		const bargeInStatus = state.enabled && config.bargeIn.mode === "pipewire-aec" && !state.audioRoute?.echoCancelled
 			? "off (PipeWire fallback)"
 			: config.bargeIn.mode;
+		const ttsStatus = config.ttsBackend === "gemini"
+			? `Gemini ${config.ttsGeminiModel}, voice ${config.ttsGeminiVoiceId}`
+			: `local ${config.ttsModel}, voice ${config.ttsVoiceId}`;
 		return [
 			`Talk mode: ${state.enabled ? state.phase : "off"}`,
 			`input: ${state.requestedInputEnabled ? "on" : "off"}${state.inputPreemptionLeases > 0 ? " (capture preempted)" : ""}`,
 			`output: ${state.outputEnabled ? "on" : "off"}`,
 			`STT: local ${config.sttModel}`,
 			"speech validation: local Silero VAD",
-			`TTS: local ${config.ttsModel}, voice ${config.ttsVoiceId}`,
+			`TTS: ${ttsStatus}`,
 			`barge-in: ${bargeInStatus}`,
 			`endpoint silence: ${config.vad.hangoverMs} ms`,
 		];
