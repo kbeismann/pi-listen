@@ -15,6 +15,7 @@ import {
 } from "./dock-status";
 import type { TalkAudioRoute } from "./pipewire-aec";
 import type { SpeechDetector } from "./sherpa-vad";
+import { isGeminiTtsQuotaError } from "./tts-gemini";
 import { prepareForSpeech } from "./tts-text-filter";
 
 export type TalkContext = ExtensionContext | ExtensionCommandContext;
@@ -50,6 +51,8 @@ export interface TalkModeDependencies {
 	getConfig(): VoiceConfig;
 	spawnCapture(audioRoute?: TalkAudioRoute): TalkCapture | null;
 	prepare(config: VoiceConfig, signal: AbortSignal): Promise<void>;
+	/** Lazily make the configured local model ready after Gemini exhausts quota. */
+	prepareLocalSpeech(config: VoiceConfig, signal: AbortSignal): Promise<void>;
 	createSpeechDetector(config: VoiceConfig): SpeechDetector;
 	prepareAudio?(config: VoiceConfig, signal: AbortSignal): Promise<TalkAudioRoute>;
 	transcribe(pcm: Buffer, config: VoiceConfig): Promise<string>;
@@ -928,12 +931,11 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			state.speechAbort = controller;
 			setPhase("speaking", ctx);
 			try {
-				const result = await dependencies.speak(
+				const result = await speakWithQuotaFallback(
 					confirmation,
 					state.config,
 					ctx,
-					controller.signal,
-					state.audioRoute,
+					controller,
 					handlePlaybackStart,
 				);
 				if (
@@ -1036,6 +1038,63 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		);
 	}
 
+	async function speakWithQuotaFallback(
+		text: string,
+		config: VoiceConfig,
+		ctx: TalkContext,
+		controller: AbortController,
+		onPlaybackStart: () => void,
+	): Promise<void | TalkSpeechResult> {
+		try {
+			return await dependencies.speak(
+				text,
+				config,
+				ctx,
+				controller.signal,
+				state.audioRoute,
+				onPlaybackStart,
+			);
+		} catch (error) {
+			if (
+				controller.signal.aborted
+				|| config.talk.ttsBackend !== "gemini"
+				|| !isGeminiTtsQuotaError(error)
+			) throw error;
+
+			// The cloned Talk config belongs only to this enable/disable cycle.
+			// Mutating it makes quota fallback sticky for the current session while
+			// preserving Gemini as the configured backend after Talk restarts.
+			// Gemini's output adapter closes its player before surfacing the HTTP
+			// error. Reset Talk's matching playback and heard-text bookkeeping before
+			// opening a differently keyed local player for the same response.
+			resetSharedSpeechOutput();
+			config.talk.ttsBackend = "local";
+			notify(
+				ctx,
+				`Gemini TTS quota exceeded; using local TTS ${config.talk.ttsModel} until Talk restarts.`,
+				"warning",
+			);
+			try {
+				await dependencies.prepareLocalSpeech(config, controller.signal);
+			} catch (localError) {
+				if ((localError as Error)?.name === "AbortError") throw localError;
+				throw new Error(
+					`Gemini TTS quota exceeded and local fallback ${config.talk.ttsModel} could not start: `
+					+ (localError instanceof Error ? localError.message : String(localError)),
+				);
+			}
+			if (controller.signal.aborted) throw makeAbortError();
+			return dependencies.speak(
+				text,
+				config,
+				ctx,
+				controller.signal,
+				state.audioRoute,
+				onPlaybackStart,
+			);
+		}
+	}
+
 	function enqueueSpeech(
 		text: string,
 		runId: number,
@@ -1058,12 +1117,11 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			state.speechAbort = controller;
 			setPhase("speaking");
 			try {
-				const result = await dependencies.speak(
+				const result = await speakWithQuotaFallback(
 					text,
 					state.config,
 					state.ctx,
-					controller.signal,
-					state.audioRoute,
+					controller,
 					handlePlaybackStart,
 				);
 				// Cancellation can race with a player accepting its final buffer.

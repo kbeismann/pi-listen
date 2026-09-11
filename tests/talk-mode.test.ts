@@ -9,6 +9,7 @@ import {
 	type TalkCapture,
 	type TalkModeDependencies,
 } from "../extensions/voice/talk-mode";
+import { GeminiTtsHttpError } from "../extensions/voice/tts-gemini";
 
 class FakeCaptureProcess extends EventEmitter {
 	stdout = new PassThrough();
@@ -165,6 +166,7 @@ function makeHarness(options: Partial<TalkModeDependencies> = {}) {
 			return { process, tool: "fake" } as unknown as TalkCapture;
 		},
 		prepare: async () => {},
+		prepareLocalSpeech: async () => {},
 		createSpeechDetector: createToneSpeechDetector,
 		transcribe: async () => "hello from the local microphone",
 		speak: async (text) => { spoken.push(text); },
@@ -563,6 +565,75 @@ describe("continuous talk mode", () => {
 
 		expect(accumulatedText.length).toBeGreaterThan(2_000);
 		expect(harness.spoken).toEqual([accumulatedText]);
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("uses sticky local speech after Gemini exhausts quota until Talk restarts", async () => {
+		const attemptedBackends: string[] = [];
+		const preparedBackends: string[] = [];
+		const harness = makeHarness({
+			prepareLocalSpeech: async (config) => { preparedBackends.push(config.talk.ttsBackend); },
+			speak: async (_text, config) => {
+				attemptedBackends.push(config.talk.ttsBackend);
+				if (config.talk.ttsBackend === "gemini") {
+					throw new GeminiTtsHttpError(429, '{"error":{"message":"quota exceeded"}}');
+				}
+			},
+		});
+		harness.config.talk.ttsBackend = "gemini";
+		await harness.mode.enable(harness.context as any);
+
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: { id: "limited", role: "assistant", content: [{ type: "text", text: "Use the fallback." }] },
+		});
+		await harness.mode.handleAgentSettled();
+
+		expect(attemptedBackends).toEqual(["gemini", "local"]);
+		expect(preparedBackends).toEqual(["local"]);
+		expect(harness.mode._state.config?.talk.ttsBackend).toBe("local");
+		expect(harness.config.talk.ttsBackend).toBe("gemini");
+		expect(harness.context.notifications.filter(({ message }) => message.includes("until Talk restarts")))
+			.toHaveLength(1);
+
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: { id: "next", role: "assistant", content: [{ type: "text", text: "Stay local." }] },
+		});
+		await harness.mode.handleAgentSettled();
+		expect(attemptedBackends).toEqual(["gemini", "local", "local"]);
+		expect(preparedBackends).toEqual(["local"]);
+
+		await harness.mode.disable(harness.context as any, { notify: false });
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: { id: "retry", role: "assistant", content: [{ type: "text", text: "Retry Gemini." }] },
+		});
+		await harness.mode.handleAgentSettled();
+		expect(attemptedBackends).toEqual(["gemini", "local", "local", "gemini", "local"]);
+		expect(preparedBackends).toEqual(["local", "local"]);
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("does not hide non-quota Gemini speech failures behind local fallback", async () => {
+		let localPreparationCount = 0;
+		const harness = makeHarness({
+			prepareLocalSpeech: async () => { localPreparationCount += 1; },
+			speak: async () => { throw new GeminiTtsHttpError(503, "unavailable"); },
+		});
+		harness.config.talk.ttsBackend = "gemini";
+		await harness.mode.enable(harness.context as any);
+		await harness.mode.beginAgentRun("base", harness.context as any);
+		harness.mode.handleMessageEnd({
+			message: { id: "unavailable", role: "assistant", content: [{ type: "text", text: "Report the failure." }] },
+		});
+		await harness.mode.handleAgentSettled();
+
+		expect(localPreparationCount).toBe(0);
+		expect(harness.mode._state.config?.talk.ttsBackend).toBe("gemini");
+		expect(harness.context.notifications.some(({ message }) => message.includes("Gemini TTS HTTP 503")))
+			.toBe(true);
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
 

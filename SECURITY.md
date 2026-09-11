@@ -55,7 +55,9 @@ Audio is streamed to Deepgram for transcription via encrypted WebSocket
 (`wss://`). When Gemini Talk TTS is selected, completed assistant messages are
 sent to the Gemini Developer API over HTTPS and the returned PCM is buffered
 briefly in memory before ephemeral playback. Refer to each provider's current
-data-processing terms for remote retention behavior.
+data-processing terms for remote retention behavior. After Gemini returns HTTP
+429, the rejected message is replayed through local TTS and subsequent messages
+remain local until Talk restarts.
 
 ### 2. No Telemetry
 pi-listen does not collect, transmit, or store any usage data, analytics, or telemetry.
@@ -77,7 +79,7 @@ pi-listen does not collect, transmit, or store any usage data, analytics, or tel
 ### 5. Principle of Least Privilege
 - Runs as the current user (no root required)
 - Credential-file access is limited to the documented `~/.authinfo` fallback
-- Audio data flows to Deepgram only when cloud STT is selected; assistant text flows to Google only when Gemini Talk TTS is selected
+- Audio data flows to Deepgram only when cloud STT is selected; assistant text flows to Google only while Gemini Talk TTS is selected and has not fallen back after HTTP 429
 
 ## Recent Security Audit
 
