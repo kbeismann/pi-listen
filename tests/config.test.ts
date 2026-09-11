@@ -44,7 +44,10 @@ describe("loadConfigWithSource", () => {
 		expect(result.config.onboarding.completed).toBe(false);
 		expect(result.config.scope).toBe("global");
 		expect(result.config.talk.sttModel).toBe("parakeet-v3");
+		expect(result.config.talk.ttsBackend).toBe("local");
 		expect(result.config.talk.ttsModel).toBe("kokoro-en-v0_19");
+		expect(result.config.talk.ttsGeminiModel).toBe("gemini-3.1-flash-tts-preview");
+		expect(result.config.talk.ttsGeminiVoiceId).toBe("Leda");
 		expect(result.config.talk.voiceControl).toBe(false);
 		expect(result.config.talk.bargeIn.mode).toBe("off");
 		expect(result.config.talk.bargeIn.minSpeechMs).toBe(250);
@@ -64,9 +67,12 @@ describe("loadConfigWithSource", () => {
 				sttModel: "parakeet-v3",
 				ttsModel: "kokoro-en-v0_19",
 				ttsVoiceId: "zero",
+				ttsBackend: "gemini",
+				ttsGeminiModel: " gemini-3.1-flash-tts-preview ",
+				ttsGeminiVoiceId: " Leda ",
 				voiceControl: true,
 				allowedTools: ["read", "read", 42, "grep", "bash", "write"],
-				bargeIn: { mode: "pipewire-aec", minSpeechMs: 50, guardMs: 9_000 },
+				bargeIn: { mode: "pipewire-aec", minSpeechMs: 1_500, guardMs: 9_000 },
 				vad: { hangoverMs: 50, thresholdDb: -35 },
 			},
 		});
@@ -76,10 +82,13 @@ describe("loadConfigWithSource", () => {
 		expect("modelId" in talk).toBe(false);
 		expect("thinkingLevel" in talk).toBe(false);
 		expect(talk.ttsVoiceId).toBe(0);
+		expect(talk.ttsBackend).toBe("gemini");
+		expect(talk.ttsGeminiModel).toBe("gemini-3.1-flash-tts-preview");
+		expect(talk.ttsGeminiVoiceId).toBe("Leda");
 		expect(talk.voiceControl).toBe(true);
 		expect("allowedTools" in talk).toBe(false);
 		expect(talk.bargeIn.mode).toBe("pipewire-aec");
-		expect(talk.bargeIn.minSpeechMs).toBe(250);
+		expect(talk.bargeIn.minSpeechMs).toBe(1_500);
 		expect(talk.bargeIn.guardMs).toBe(500);
 		expect(talk.vad.hangoverMs).toBe(500);
 		expect(talk.vad.thresholdDb).toBe(-35);

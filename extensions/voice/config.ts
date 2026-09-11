@@ -1,6 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	DEFAULT_GEMINI_TTS_MODEL,
+	DEFAULT_GEMINI_TTS_VOICE,
+} from "./tts-gemini";
 
 function getAgentDir(): string {
 	return path.join(os.homedir(), ".pi", "agent");
@@ -24,17 +28,25 @@ export interface VoiceOnboardingState {
 export type VoiceBackend = "deepgram" | "local";
 
 export type TalkBargeInMode = "off" | "headphones" | "pipewire-aec";
+export type TalkTtsBackend = "local" | "gemini";
 
 export interface ContinuousTalkConfig {
-	/** Local speech models used by the hands-free conversation loop. */
+	/** Local transcription model used by the hands-free conversation loop. */
 	sttModel: string;
+	/** Select local synthesis or the paid Gemini Developer API. */
+	ttsBackend: TalkTtsBackend;
+	/** Local synthesis model retained for explicit offline operation. */
 	ttsModel: string;
 	ttsVoiceId: number;
+	/** Gemini Developer API model and prebuilt voice used by remote synthesis. */
+	ttsGeminiModel: string;
+	ttsGeminiVoiceId: string;
 	/** Expose Talk's input and output gates through its local Unix socket. */
 	voiceControl: boolean;
 	/** Optional headphone-safe interruption while the agent is answering. */
 	bargeIn: {
 		mode: TalkBargeInMode;
+		/** Continuous validated speech required to interrupt, from 100 to 3,000 ms. */
 		minSpeechMs: number;
 		guardMs: number;
 	};
@@ -168,8 +180,11 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	ttsOnboardingShown: false,
 	talk: {
 		sttModel: "parakeet-v3",
+		ttsBackend: "local",
 		ttsModel: "kokoro-en-v0_19",
 		ttsVoiceId: 0,
+		ttsGeminiModel: DEFAULT_GEMINI_TTS_MODEL,
+		ttsGeminiVoiceId: DEFAULT_GEMINI_TTS_VOICE,
 		voiceControl: false,
 		bargeIn: {
 			mode: "off",
@@ -222,6 +237,7 @@ function normalizeOnboarding(input: any, fallbackCompleted: boolean): VoiceOnboa
 }
 
 const TALK_BARGE_IN_MODES = new Set<TalkBargeInMode>(["off", "headphones", "pipewire-aec"]);
+const TALK_TTS_BACKENDS = new Set<TalkTtsBackend>(["local", "gemini"]);
 
 function finiteInRange(value: unknown, fallback: number, min: number, max: number): number {
 	return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max
@@ -237,10 +253,19 @@ function normalizeTalkConfig(input: any): ContinuousTalkConfig {
 		sttModel: typeof input?.sttModel === "string" && input.sttModel.trim()
 			? input.sttModel.trim()
 			: defaults.sttModel,
+		ttsBackend: TALK_TTS_BACKENDS.has(input?.ttsBackend)
+			? input.ttsBackend
+			: defaults.ttsBackend,
 		ttsModel: typeof input?.ttsModel === "string" && input.ttsModel.trim()
 			? input.ttsModel.trim()
 			: defaults.ttsModel,
 		ttsVoiceId: finiteInRange(input?.ttsVoiceId, defaults.ttsVoiceId, 0, 10_000),
+		ttsGeminiModel: typeof input?.ttsGeminiModel === "string" && input.ttsGeminiModel.trim()
+			? input.ttsGeminiModel.trim()
+			: defaults.ttsGeminiModel,
+		ttsGeminiVoiceId: typeof input?.ttsGeminiVoiceId === "string" && input.ttsGeminiVoiceId.trim()
+			? input.ttsGeminiVoiceId.trim()
+			: defaults.ttsGeminiVoiceId,
 		voiceControl: typeof input?.voiceControl === "boolean"
 			? input.voiceControl
 			: defaults.voiceControl,
@@ -248,7 +273,7 @@ function normalizeTalkConfig(input: any): ContinuousTalkConfig {
 			mode: TALK_BARGE_IN_MODES.has(rawBargeIn?.mode)
 				? rawBargeIn.mode
 				: defaults.bargeIn.mode,
-			minSpeechMs: finiteInRange(rawBargeIn?.minSpeechMs, defaults.bargeIn.minSpeechMs, 100, 1_000),
+			minSpeechMs: finiteInRange(rawBargeIn?.minSpeechMs, defaults.bargeIn.minSpeechMs, 100, 3_000),
 			guardMs: finiteInRange(rawBargeIn?.guardMs, defaults.bargeIn.guardMs, 0, 3_000),
 		},
 		vad: {

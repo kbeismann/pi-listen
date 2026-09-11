@@ -43,15 +43,19 @@ The following are **out of scope:**
 
 | Area | Reason |
 |------|--------|
-| Deepgram API key exposure | User-managed credential, documented in setup |
+| Provider API key exposure | User-managed credential, documented in setup |
 | Denial of service via long recordings | Local-only, self-inflicted (120s auto-stop cap) |
 
 ## Security Design Principles
 
 pi-listen follows these security principles:
 
-### 1. Cloud STT
-Audio is streamed to Deepgram for transcription via encrypted WebSocket (wss://). No audio is stored locally or on the server after transcription.
+### 1. Cloud speech services
+Audio is streamed to Deepgram for transcription via encrypted WebSocket
+(`wss://`). When Gemini Talk TTS is selected, batched assistant response
+fragments are sent to the Gemini Developer API over HTTPS and the returned PCM
+is buffered briefly in memory before ephemeral playback. Refer to each
+provider's current data-processing terms for remote retention behavior.
 
 ### 2. No Telemetry
 pi-listen does not collect, transmit, or store any usage data, analytics, or telemetry.
@@ -63,16 +67,17 @@ pi-listen does not collect, transmit, or store any usage data, analytics, or tel
 - Recording auto-stops after 120 seconds
 
 ### 4. Defense in Depth
-- API key resolved from environment variable or config, never logged or included in error messages
+- API keys are resolved from their documented environment or credential files, never logged, and never included in request URLs
 - Env-derived `DEEPGRAM_API_KEY` values are runtime-only and are not persisted back into `~/.pi/agent/settings.json`
+- Gemini keys from `GEMINI_API_KEY` or `~/.authinfo` are never persisted in voice settings
 - Error responses do not expose stack traces or internal paths
 - Connection timeout (10s) and stale session watchdog (15s) prevent hung resources
 - Session corruption guard prevents overlapping recording sessions
 
 ### 5. Principle of Least Privilege
 - Runs as the current user (no root required)
-- No filesystem access beyond config files (~/.pi/agent/settings.json)
-- Audio data flows only to Deepgram API (wss://api.deepgram.com)
+- Credential-file access is limited to the documented `~/.authinfo` fallback
+- Audio data flows to Deepgram only when cloud STT is selected; assistant text flows to Google only when Gemini Talk TTS is selected
 
 ## Recent Security Audit
 
