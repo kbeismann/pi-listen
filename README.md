@@ -172,7 +172,7 @@ While Talk mode is active, hold-`SPACE` dictation remains available and temporar
 
 Talk can start with input and output independently disabled. The input and output commands then enable either channel without changing Pi's active model, session permissions, or the other channel. Input remains continuous until disabled; it is a toggle rather than push-to-talk.
 
-Talk mode defaults to speaker-safe playback. It closes microphone capture before TTS playback, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback. Continuous speech cancels playback after `bargeIn.minSpeechMs`; values from 100 through 3000 ms trade interruption speed for resistance to brief false positives. Barge-in never aborts the current model run or tool work. Shorter playback-time utterances are ignored rather than submitted as steering. The completed utterance is transcribed after the user stops speaking and queued as steering for Pi's next safe agent boundary. While the model is only thinking, `/talk` first finishes and transcribes the utterance locally; empty captures and brief backchannels such as “mm-hmm” leave the response running. On Linux, `pipewire-aec` instead creates a temporary WebRTC echo-cancellation source and sink for `/talk`, allowing the same interruption behavior over speakers. If the route cannot be created, talk mode reports the failure and falls back to speaker-safe playback. Microphone audio never leaves the machine. The resulting transcript is sent to the configured Pi model, and assistant response fragments are additionally sent to Google only when Gemini TTS is selected.
+Talk mode defaults to speaker-safe playback. It closes microphone capture before TTS playback, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback. Continuous speech cancels playback after `bargeIn.minSpeechMs`; values from 100 through 3000 ms trade interruption speed for resistance to brief false positives. Barge-in never aborts the current model run or tool work. Shorter playback-time utterances are ignored rather than submitted as steering. The completed utterance is transcribed after the user stops speaking and queued as steering for Pi's next safe agent boundary. While the model is only thinking, `/talk` first finishes and transcribes the utterance locally; empty captures and brief backchannels such as “mm-hmm” leave the response running. On Linux, `pipewire-aec` instead creates a temporary WebRTC echo-cancellation source and sink for `/talk`, allowing the same interruption behavior over speakers. If the route cannot be created, talk mode reports the failure and falls back to speaker-safe playback. Microphone audio never leaves the machine. The resulting transcript is sent to the configured Pi model. A completed assistant message is additionally sent to Google only when Gemini TTS is selected.
 
 The mode is isolated from ordinary Pi turns:
 
@@ -276,13 +276,13 @@ output, export `GEMINI_API_KEY` or add a
 
 Gemini Talk output uses the Developer API
 `streamGenerateContent?alt=sse` endpoint and streams its 24 kHz linear PCM
-response into the existing Talk player. Talk coalesces streamed assistant text
-into multi-sentence remote requests and buffers the first 1.2 seconds of PCM
-before playback. The bounded startup delay prevents request setup and ordinary
-network jitter from starving the audio player, while the larger requests reduce
-request-quota usage. A missing key or API failure stops the affected speech
-fragment with a visible error; Talk does not silently switch to a different paid
-service or voice.
+response into the existing Talk player. Talk waits for each assistant message to
+finish and sends it as one remote request instead of converting streamed text
+fragments independently. Local TTS retains sentence-level streaming. Gemini
+playback buffers the first 1.2 seconds of PCM so request setup and ordinary
+network jitter cannot starve the audio player. A missing key or API failure stops
+the affected response with a visible error; Talk does not silently switch to a
+different paid service or voice.
 
 For CPU-oriented conversational English, set `ttsModel` to `pocket-tts-int8-en-2026-01-26`. The first use downloads the pinned [sherpa-onnx export](https://k2-fsa.github.io/sherpa/onnx/tts/pocket.html) of [Kyutai Pocket TTS](https://github.com/kyutai-labs/pocket-tts), verifies its SHA-256, and conditions generation on the bundled Bria reference recording. The exported archive includes a non-commercial-use notice in addition to its CC BY 4.0 license; review those terms before using generated speech outside personal or evaluation contexts.
 
@@ -452,7 +452,7 @@ Run `/voice test` inside Pi for full diagnostics.
 
 - **Cloud STT** — audio is sent to Deepgram for transcription (Deepgram backend only)
 - **Local STT** — audio never leaves your machine (local backend)
-- **Gemini Talk TTS** — assistant response fragments are sent to Google only when `voice.talk.ttsBackend` is `gemini`
+- **Gemini Talk TTS** — completed assistant messages are sent to Google only when `voice.talk.ttsBackend` is `gemini`
 - **No telemetry** — pi-listen does not collect or transmit usage data
 - **API keys** — Gemini uses `GEMINI_API_KEY` or `~/.authinfo`; keys are never logged
 
