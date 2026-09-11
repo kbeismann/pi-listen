@@ -280,9 +280,11 @@ response into the existing Talk player. Talk waits for each assistant message to
 finish and sends it as one remote request instead of converting streamed text
 fragments independently. Local TTS retains sentence-level streaming. Gemini
 playback buffers the first 1.2 seconds of PCM so request setup and ordinary
-network jitter cannot starve the audio player. A missing key or API failure stops
-the affected response with a visible error; Talk does not silently switch to a
-different paid service or voice.
+network jitter cannot starve the audio player. If Gemini returns HTTP 429, Talk
+prepares the configured local model, speaks the affected response locally, and
+keeps using local TTS until Talk restarts. Restarting Talk retries Gemini. Other
+API failures stop the affected response with a visible error; Talk does not
+silently switch to a different paid service or voice.
 
 For CPU-oriented conversational English, set `ttsModel` to `pocket-tts-int8-en-2026-01-26`. The first use downloads the pinned [sherpa-onnx export](https://k2-fsa.github.io/sherpa/onnx/tts/pocket.html) of [Kyutai Pocket TTS](https://github.com/kyutai-labs/pocket-tts), verifies its SHA-256, and conditions generation on the bundled Bria reference recording. The exported archive includes a non-commercial-use notice in addition to its CC BY 4.0 license; review those terms before using generated speech outside personal or evaluation contexts.
 

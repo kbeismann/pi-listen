@@ -7,6 +7,8 @@ import {
 	geminiSpeak,
 	GEMINI_API_HOST,
 	GEMINI_TTS_SAMPLE_RATE,
+	GeminiTtsHttpError,
+	isGeminiTtsQuotaError,
 	resolveGeminiApiKey,
 } from "../extensions/voice/tts-gemini";
 import type { PlaybackStream } from "../extensions/voice/tts-playback";
@@ -163,7 +165,7 @@ describe("Gemini TTS endpoint", () => {
 
 	test("surfaces bounded HTTP errors without putting the key in the URL", async () => {
 		let requestUrl = "";
-		expect(geminiSpeak({
+		const error = await geminiSpeak({
 			text: "Unauthorized.",
 			model: "gemini-3.1-flash-tts-preview",
 			voiceId: "Leda",
@@ -173,8 +175,18 @@ describe("Gemini TTS endpoint", () => {
 				requestUrl = String(input);
 				return new Response('{"error":{"message":"permission denied"}}', { status: 403 });
 			}) as typeof fetch,
-		})).rejects.toThrow(/Gemini TTS HTTP 403/);
+		}).catch((caught) => caught);
+		expect(error).toBeInstanceOf(GeminiTtsHttpError);
+		expect(error.status).toBe(403);
+		expect(error.message).toMatch(/Gemini TTS HTTP 403/);
+		expect(isGeminiTtsQuotaError(error)).toBe(false);
 		expect(requestUrl).not.toContain("secret-test-key");
+	});
+
+	test("identifies HTTP 429 as quota exhaustion", () => {
+		expect(isGeminiTtsQuotaError(new GeminiTtsHttpError(429, "quota exceeded"))).toBe(true);
+		expect(isGeminiTtsQuotaError(new GeminiTtsHttpError(500, "server error"))).toBe(false);
+		expect(isGeminiTtsQuotaError(new Error("Gemini TTS HTTP 429"))).toBe(false);
 	});
 
 	test("rejects successful responses that contain no audio", async () => {

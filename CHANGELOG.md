@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sticky local fallback for Gemini quota exhaustion** — an HTTP 429 now
+  replays the affected response through the configured local TTS model and
+  keeps Talk local for the rest of that session. Restarting Talk retries the
+  configured Gemini backend; unrelated Gemini failures remain visible errors.
 - **Gemini Talk request amplification** — Gemini now receives one completed
   assistant message per TTS request instead of several streamed fragments. Local
   TTS retains sentence-level streaming for lower first-audio latency.

@@ -54,6 +54,21 @@ export interface GeminiSpeakDependencies {
 	resolveApiKey?: () => string | null;
 }
 
+/** Preserve HTTP status so Talk can react to quota exhaustion without parsing prose. */
+export class GeminiTtsHttpError extends Error {
+	constructor(
+		readonly status: number,
+		responseBody = "",
+	) {
+		super(`Gemini TTS HTTP ${status}${responseBody ? `: ${responseBody}` : ""}`);
+		this.name = "GeminiTtsHttpError";
+	}
+}
+
+export function isGeminiTtsQuotaError(error: unknown): boolean {
+	return error instanceof GeminiTtsHttpError && error.status === 429;
+}
+
 /** Resolve the Developer API key without copying it into voice configuration. */
 export function resolveGeminiApiKey(options: GeminiApiKeyOptions = {}): string | null {
 	const env = options.env ?? process.env;
@@ -133,7 +148,7 @@ export async function geminiSpeak(
 	if (!response.ok) {
 		let body = "";
 		try { body = (await response.text()).trim().slice(0, 300); } catch { /* response body unavailable */ }
-		throw new Error(`Gemini TTS HTTP ${response.status}${body ? `: ${body}` : ""}`);
+		throw new GeminiTtsHttpError(response.status, body);
 	}
 
 	const sampleChunks: Float32Array[] = [];

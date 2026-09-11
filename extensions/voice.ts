@@ -3089,6 +3089,18 @@ export default function (pi: ExtensionAPI) {
 	// lifecycle and are removed when the mode stops.
 	let publishTalkState = (): void => {};
 	const talkSpeechOutput = createTalkSpeechOutput();
+	const prepareTalkLocalSpeech = async (voiceConfig: VoiceConfig, signal: AbortSignal): Promise<void> => {
+		const { ensureTtsModelInstalled, getInstalledTtsModelDir, getTtsModel } = await import("./voice/tts-local-models");
+		const { warmupTts } = await import("./voice/tts-engine");
+		await ensureTtsModelInstalled(voiceConfig.talk.ttsModel, { signal });
+		if (signal.aborted) throw new DOMException("Talk setup aborted", "AbortError");
+		const model = getTtsModel(voiceConfig.talk.ttsModel);
+		const modelDir = getInstalledTtsModelDir(model.id);
+		if (!await warmupTts(model, modelDir, { signal })) {
+			if (signal.aborted) throw new DOMException("Talk setup aborted", "AbortError");
+			throw new Error(`Could not initialize local TTS model ${model.id}.`);
+		}
+	};
 	let talkVoiceControl: ReturnType<typeof createTalkVoiceControlServer> | null = null;
 	const continuousTalk = createTalkMode(pi, {
 		getConfig: () => config,
@@ -3151,16 +3163,9 @@ export default function (pi: ExtensionAPI) {
 
 			if (useGeminiTts) return;
 
-			const { ensureTtsModelInstalled, getInstalledTtsModelDir, getTtsModel } = await import("./voice/tts-local-models");
-			const { warmupTts } = await import("./voice/tts-engine");
-			await ensureTtsModelInstalled(voiceConfig.talk.ttsModel, { signal });
-			if (signal.aborted) throw new DOMException("Talk setup aborted", "AbortError");
-			const model = getTtsModel(voiceConfig.talk.ttsModel);
-			const modelDir = getInstalledTtsModelDir(model.id);
-			if (!await warmupTts(model, modelDir, { signal })) {
-				throw new Error(`Could not initialize local TTS model ${model.id}.`);
-			}
+			await prepareTalkLocalSpeech(voiceConfig, signal);
 		},
+		prepareLocalSpeech: prepareTalkLocalSpeech,
 		createSpeechDetector: (voiceConfig) => createSherpaSpeechDetector({
 			minSpeechMs: voiceConfig.talk.vad.minSpeechMs,
 			minSilenceMs: voiceConfig.talk.vad.hangoverMs,
