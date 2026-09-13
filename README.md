@@ -166,13 +166,13 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 ### Hands-free conversation
 
-`/talk on` starts an automatic conversation loop. Speak normally; inexpensive energy detection buffers and endpoints the audio, while a local Silero neural VAD must validate actual speech before Parakeet can transcribe it. Pi answers, and either a configured local TTS model or the Gemini Developer API speaks the answer. Local speech models download automatically with no metered API; Gemini speech output uses paid API capacity. The microphone listens while Pi is thinking and between turns, so no key is held or pressed. `/talk off` immediately stops capture and playback.
+`/talk on` starts an automatic conversation loop. Speak normally; inexpensive energy detection buffers and endpoints the audio, while a local Silero neural VAD must validate actual speech before the configured STT backend receives the completed utterance. Parakeet transcribes locally by default, while optional Gemini transcription uses the paid Developer API. Pi answers, and either a configured local TTS model or the Gemini Developer API speaks the answer. Local speech models download automatically with no metered API. The microphone listens while Pi is thinking and between turns, so no key is held or pressed. `/talk off` immediately stops capture and playback.
 
 While Talk mode is active, hold-`SPACE` dictation remains available and temporarily takes microphone priority. Talk resumes capture only if its input gate remains enabled.
 
 Talk can start with input and output independently disabled. The input and output commands then enable either channel without changing Pi's active model, session permissions, or the other channel. Input remains continuous until disabled; it is a toggle rather than push-to-talk.
 
-Talk mode defaults to speaker-safe playback. It closes microphone capture before TTS playback, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback. Continuous speech cancels playback after `bargeIn.minSpeechMs`; values from 100 through 3000 ms trade interruption speed for resistance to brief false positives. Barge-in never aborts the current model run or tool work. Shorter playback-time utterances are ignored rather than submitted as steering. The completed utterance is transcribed after the user stops speaking and queued as steering for Pi's next safe agent boundary. While the model is only thinking, `/talk` first finishes and transcribes the utterance locally; empty captures and brief backchannels such as “mm-hmm” leave the response running. On Linux, `pipewire-aec` instead creates a temporary WebRTC echo-cancellation source and sink for `/talk`, allowing the same interruption behavior over speakers. If the route cannot be created, talk mode reports the failure and falls back to speaker-safe playback. Microphone audio never leaves the machine. The resulting transcript is sent to the configured Pi model. A completed assistant message is additionally sent to Google only when Gemini TTS is selected.
+Talk mode defaults to speaker-safe playback. It closes microphone capture before TTS playback, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback. Continuous speech cancels playback after `bargeIn.minSpeechMs`; values from 100 through 3000 ms trade interruption speed for resistance to brief false positives. Barge-in never aborts the current model run or tool work. Shorter playback-time utterances are ignored rather than submitted as steering. The completed utterance is transcribed after the user stops speaking and queued as steering for Pi's next safe agent boundary. While the model is only thinking, `/talk` first finishes and transcribes the utterance; empty captures and brief backchannels such as “mm-hmm” leave the response running. On Linux, `pipewire-aec` instead creates a temporary WebRTC echo-cancellation source and sink for `/talk`, allowing the same interruption behavior over speakers. If the route cannot be created, talk mode reports the failure and falls back to speaker-safe playback. With local STT, microphone audio never leaves the machine. With Gemini STT, only a completed utterance that passed local Silero validation is sent to Google; ambient listening and rejected noise remain local. The resulting transcript is sent to the configured Pi model. A completed assistant message is additionally sent to Google only when Gemini TTS is selected.
 
 The mode is isolated from ordinary Pi turns:
 
@@ -230,12 +230,13 @@ both input and output disabled. `/talk` remains the lifecycle command; an
 explicit `/talk off` prevents the startup flag from restarting Talk in later
 session or tree lifecycle callbacks in the same Pi process.
 
-The defaults use `parakeet-v3` and `kokoro-en-v0_19`. Configure Talk's local speech models under `voice.talk`:
+The defaults use local `parakeet-v3` transcription and `kokoro-en-v0_19` synthesis. Configure Talk's local speech models under `voice.talk`:
 
 ```json
 {
   "voice": {
     "talk": {
+      "sttBackend": "local",
       "sttModel": "parakeet-v3",
       "ttsModel": "kokoro-en-v0_19",
       "ttsVoiceId": 0,
@@ -256,6 +257,35 @@ The defaults use `parakeet-v3` and `kokoro-en-v0_19`. Configure Talk's local spe
   }
 }
 ```
+
+To use the lowest-cost Gemini transcription endpoint, export `GEMINI_API_KEY`
+or add a `generativelanguage.googleapis.com` machine entry to `~/.authinfo`,
+then set:
+
+```json
+{
+  "voice": {
+    "talk": {
+      "sttBackend": "gemini",
+      "sttModel": "parakeet-v3",
+      "sttGeminiModel": "gemini-3.5-transcribe",
+      "sttGeminiVocabulary": ["Pi", "TypeScript", "chezmoi"]
+    }
+  }
+}
+```
+
+Talk still endpoints and validates speech locally. It sends only the completed
+validated utterance as inline WAV data to the unary Gemini Transcribe API, so it
+does not maintain a metered live stream, create a local audio file, or upload a
+Gemini Files API object. Each request disables later Interactions API retrieval.
+Transcription uses verbatim mode to preserve coding instructions and corrections;
+up to 100 configured vocabulary terms bias uncommon product, repository, and
+identifier names. Talk keeps `sttModel` ready as a fallback. An HTTP 429, network
+failure, server error, or malformed service response replays the affected
+utterance locally and keeps STT local until Talk restarts.
+Authentication and other request errors remain visible instead of being hidden
+by fallback.
 
 To keep transcription local and use the Gemini Developer API for speech
 output, export `GEMINI_API_KEY` or add a
@@ -454,6 +484,7 @@ Run `/voice test` inside Pi for full diagnostics.
 
 - **Cloud STT** — audio is sent to Deepgram for transcription (Deepgram backend only)
 - **Local STT** — audio never leaves your machine (local backend)
+- **Gemini Talk STT** — only locally validated, completed utterances are sent inline to Google when `voice.talk.sttBackend` is `gemini`
 - **Gemini Talk TTS** — completed assistant messages are sent to Google only when `voice.talk.ttsBackend` is `gemini`
 - **No telemetry** — pi-listen does not collect or transmit usage data
 - **API keys** — Gemini uses `GEMINI_API_KEY` or `~/.authinfo`; keys are never logged

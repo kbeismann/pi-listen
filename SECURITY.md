@@ -52,12 +52,18 @@ pi-listen follows these security principles:
 
 ### 1. Cloud speech services
 Audio is streamed to Deepgram for transcription via encrypted WebSocket
-(`wss://`). When Gemini Talk TTS is selected, completed assistant messages are
+(`wss://`). When Gemini Talk STT is selected, local energy endpointing and Silero
+speech validation run first; only the completed validated utterance is sent
+inline over HTTPS. pi-listen does not create an audio file or Gemini Files API
+object for that request, and sets `store` to false so the interaction cannot be
+retrieved later through the API. A transient Gemini STT failure replays the
+utterance through the configured local model and keeps transcription local until
+Talk restarts. When Gemini Talk TTS is selected, completed assistant messages are
 sent to the Gemini Developer API over HTTPS and the returned PCM is buffered
 briefly in memory before ephemeral playback. Refer to each provider's current
-data-processing terms for remote retention behavior. After Gemini returns HTTP
-429, the rejected message is replayed through local TTS and subsequent messages
-remain local until Talk restarts.
+data-processing terms for remote retention behavior. After Gemini TTS returns
+HTTP 429, the rejected message is replayed through local TTS and subsequent
+messages remain local until Talk restarts.
 
 ### 2. No Telemetry
 pi-listen does not collect, transmit, or store any usage data, analytics, or telemetry.
@@ -79,7 +85,7 @@ pi-listen does not collect, transmit, or store any usage data, analytics, or tel
 ### 5. Principle of Least Privilege
 - Runs as the current user (no root required)
 - Credential-file access is limited to the documented `~/.authinfo` fallback
-- Audio data flows to Deepgram only when cloud STT is selected; assistant text flows to Google only while Gemini Talk TTS is selected and has not fallen back after HTTP 429
+- Audio data flows to Deepgram only when cloud STT is selected. Locally validated utterances flow to Google only while Gemini Talk STT is selected and has not fallen back. Assistant text flows to Google only while Gemini Talk TTS is selected and has not fallen back after HTTP 429.
 
 ## Recent Security Audit
 

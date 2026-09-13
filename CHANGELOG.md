@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gemini Talk transcription** — Talk can send only locally endpointed and
+  Silero-validated utterances to the low-cost unary `gemini-3.5-transcribe`
+  endpoint. Inline WAV requests use verbatim mode and optional vocabulary hints
+  without local or Gemini Files API storage. Quota, network, and transient
+  service failures replay through the configured local model and keep STT local
+  until Talk restarts; local transcription remains the default.
 - **Gemini Talk speech output** — Talk can keep Parakeet transcription local
   while sending completed assistant messages through the Gemini Developer API
   `streamGenerateContent` endpoint. One request per message avoids streamed-text

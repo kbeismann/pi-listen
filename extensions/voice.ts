@@ -3084,9 +3084,10 @@ export default function (pi: ExtensionAPI) {
 	// ─── Hands-free /talk mode ─────────────────────────────────────────────
 	//
 	// /talk deliberately uses an audio path separate from hold-to-talk. It
-	// always keeps STT local, while TTS can use either a local model or Gemini.
-	// Optional PipeWire routing and local gate control exist only for the /talk
-	// lifecycle and are removed when the mode stops.
+	// always validates speech locally, then can transcribe through either a
+	// local model or Gemini. TTS independently selects local or Gemini output.
+	// Optional PipeWire routing and local gate control exist only for the
+	// /talk lifecycle and are removed when the mode stops.
 	let publishTalkState = (): void => {};
 	const talkSpeechOutput = createTalkSpeechOutput();
 	const prepareTalkLocalSpeech = async (voiceConfig: VoiceConfig, signal: AbortSignal): Promise<void> => {
@@ -3144,12 +3145,16 @@ export default function (pi: ExtensionAPI) {
 			return createPipeWireEchoCancellation({ signal });
 		},
 		prepare: async (voiceConfig, signal) => {
+			const useGeminiStt = voiceConfig.talk.sttBackend === "gemini";
 			const useGeminiTts = voiceConfig.talk.ttsBackend === "gemini";
-			if (useGeminiTts) {
+			if (useGeminiStt || useGeminiTts) {
 				const { requireGeminiApiKey } = await import("./voice/tts-gemini");
 				requireGeminiApiKey();
 			}
 
+			// Keep local STT warm even when Gemini is selected so quota and
+			// transient service failures can replay the affected utterance without
+			// asking the user to repeat it.
 			const sttConfig: VoiceConfig = {
 				...voiceConfig,
 				backend: "local",
@@ -3171,7 +3176,16 @@ export default function (pi: ExtensionAPI) {
 			minSilenceMs: voiceConfig.talk.vad.hangoverMs,
 			maxSpeechMs: voiceConfig.talk.vad.maxUtteranceMs,
 		}),
-		transcribe: async (pcm, voiceConfig) => {
+		transcribe: async (pcm, voiceConfig, signal) => {
+			if (voiceConfig.talk.sttBackend === "gemini") {
+				const { transcribeGeminiPcm } = await import("./voice/stt-gemini");
+				return transcribeGeminiPcm({
+					pcm,
+					model: voiceConfig.talk.sttGeminiModel,
+					vocabulary: voiceConfig.talk.sttGeminiVocabulary,
+					signal,
+				});
+			}
 			const sttConfig: VoiceConfig = {
 				...voiceConfig,
 				backend: "local",

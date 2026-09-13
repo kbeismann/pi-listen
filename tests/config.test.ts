@@ -43,7 +43,10 @@ describe("loadConfigWithSource", () => {
 		expect(result.config.enabled).toBe(true);
 		expect(result.config.onboarding.completed).toBe(false);
 		expect(result.config.scope).toBe("global");
+		expect(result.config.talk.sttBackend).toBe("local");
 		expect(result.config.talk.sttModel).toBe("parakeet-v3");
+		expect(result.config.talk.sttGeminiModel).toBe("gemini-3.5-transcribe");
+		expect(result.config.talk.sttGeminiVocabulary).toEqual([]);
 		expect(result.config.talk.ttsBackend).toBe("local");
 		expect(result.config.talk.ttsModel).toBe("kokoro-en-v0_19");
 		expect(result.config.talk.ttsGeminiModel).toBe("gemini-3.1-flash-tts-preview");
@@ -64,7 +67,10 @@ describe("loadConfigWithSource", () => {
 				modelProvider: " openai-codex ",
 				modelId: " gpt-5.6-terra ",
 				thinkingLevel: "turbo",
+				sttBackend: "gemini",
 				sttModel: "parakeet-v3",
+				sttGeminiModel: " models/gemini-3.5-transcribe ",
+				sttGeminiVocabulary: [" Pi ", "", 42, "Pi", "chezmoi"],
 				ttsModel: "kokoro-en-v0_19",
 				ttsVoiceId: "zero",
 				ttsBackend: "gemini",
@@ -81,6 +87,9 @@ describe("loadConfigWithSource", () => {
 		expect("modelProvider" in talk).toBe(false);
 		expect("modelId" in talk).toBe(false);
 		expect("thinkingLevel" in talk).toBe(false);
+		expect(talk.sttBackend).toBe("gemini");
+		expect(talk.sttGeminiModel).toBe("models/gemini-3.5-transcribe");
+		expect(talk.sttGeminiVocabulary).toEqual(["Pi", "chezmoi"]);
 		expect(talk.ttsVoiceId).toBe(0);
 		expect(talk.ttsBackend).toBe("gemini");
 		expect(talk.ttsGeminiModel).toBe("gemini-3.1-flash-tts-preview");
