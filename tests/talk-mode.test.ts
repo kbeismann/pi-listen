@@ -9,6 +9,7 @@ import {
 	type TalkCapture,
 	type TalkModeDependencies,
 } from "../extensions/voice/talk-mode";
+import { GeminiSttHttpError } from "../extensions/voice/stt-gemini";
 import { GeminiTtsHttpError } from "../extensions/voice/tts-gemini";
 
 class FakeCaptureProcess extends EventEmitter {
@@ -635,6 +636,100 @@ describe("continuous talk mode", () => {
 		expect(harness.context.notifications.some(({ message }) => message.includes("Gemini TTS HTTP 503")))
 			.toBe(true);
 		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("uses sticky local transcription after a transient Gemini failure until Talk restarts", async () => {
+		const attemptedBackends: string[] = [];
+		const harness = makeHarness({
+			transcribe: async (_pcm, config) => {
+				attemptedBackends.push(config.talk.sttBackend);
+				if (config.talk.sttBackend === "gemini") {
+					throw new GeminiSttHttpError(429, "quota exceeded");
+				}
+				return "transcribed through the local fallback";
+			},
+		});
+		harness.config.talk.sttBackend = "gemini";
+		await harness.mode.enable(harness.context as any);
+
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(15);
+
+		expect(attemptedBackends).toEqual(["gemini", "local"]);
+		expect(harness.mode._state.config?.talk.sttBackend).toBe("local");
+		expect(harness.config.talk.sttBackend).toBe("gemini");
+		expect(harness.mode.statusLines()).toContain("STT: local parakeet-v3");
+		expect(harness.pi.sentMessages.at(-1)?.text).toBe("transcribed through the local fallback");
+		expect(harness.context.notifications.filter(({ message }) => message.includes("until Talk restarts")))
+			.toHaveLength(1);
+
+		harness.mode.handleTurnStart(harness.context as any);
+		feedInOddChunks(harness.captures[1]!, utteranceAudio());
+		await Bun.sleep(15);
+		expect(attemptedBackends).toEqual(["gemini", "local", "local"]);
+
+		await harness.mode.disable(harness.context as any, { notify: false });
+		await harness.mode.enable(harness.context as any);
+		expect(harness.mode.statusLines()).toContain("STT: Gemini gemini-3.5-transcribe");
+		feedInOddChunks(harness.captures[2]!, utteranceAudio());
+		await Bun.sleep(15);
+		expect(attemptedBackends).toEqual(["gemini", "local", "local", "gemini", "local"]);
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("keeps non-transient Gemini transcription errors visible", async () => {
+		const attemptedBackends: string[] = [];
+		const harness = makeHarness({
+			transcribe: async (_pcm, config) => {
+				attemptedBackends.push(config.talk.sttBackend);
+				throw new GeminiSttHttpError(403, "permission denied");
+			},
+		});
+		harness.config.talk.sttBackend = "gemini";
+		await harness.mode.enable(harness.context as any);
+
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(15);
+
+		expect(attemptedBackends).toEqual(["gemini"]);
+		expect(harness.mode._state.config?.talk.sttBackend).toBe("gemini");
+		expect(harness.pi.sentMessages).toEqual([]);
+		expect(harness.context.notifications.some(({ message }) => message.includes("Gemini STT HTTP 403")))
+			.toBe(true);
+		await harness.mode.disable(harness.context as any, { notify: false });
+	});
+
+	test("talk off aborts an in-flight Gemini transcription", async () => {
+		let transcriptionStarted = false;
+		let transcriptionAborted = false;
+		const harness = makeHarness({
+			transcribe: async (_pcm, _config, signal) => new Promise<string>((_resolve, reject) => {
+				transcriptionStarted = true;
+				const abort = () => {
+					transcriptionAborted = true;
+					const error = new Error("aborted");
+					error.name = "AbortError";
+					reject(error);
+				};
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			}),
+		});
+		harness.config.talk.sttBackend = "gemini";
+		await harness.mode.enable(harness.context as any);
+
+		feedInOddChunks(harness.captures[0]!, utteranceAudio());
+		await Bun.sleep(15);
+		expect(transcriptionStarted).toBe(true);
+
+		await harness.mode.disable(harness.context as any, {
+			notify: false,
+			awaitTranscription: true,
+		});
+		expect(transcriptionAborted).toBe(true);
+		expect(harness.pi.sentMessages).toEqual([]);
+		expect(harness.context.notifications.some(({ message }) => message.includes("Talk transcription failed")))
+			.toBe(false);
 	});
 
 	test("returns to listening when headphone capture survives spoken output", async () => {

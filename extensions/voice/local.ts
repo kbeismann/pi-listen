@@ -16,7 +16,8 @@
 import type { ChildProcess } from "node:child_process";
 import type { VoiceConfig } from "./config";
 import { isLoopbackEndpoint } from "./config";
-import { SAMPLE_RATE, CHANNELS } from "./deepgram";
+import { SAMPLE_RATE } from "./deepgram";
+import { encodeMonoPcm16leWav } from "./pcm-wav";
 
 // ─── Model catalog ───────────────────────────────────────────────────────────
 
@@ -520,36 +521,6 @@ export interface LocalSession {
 	onError: (err: string) => void;
 }
 
-// ─── WAV encoding ────────────────────────────────────────────────────────────
-
-/** Create a WAV file buffer from raw PCM data (16-bit signed LE, 16kHz, mono). */
-function createWavBuffer(pcmData: Buffer): Buffer {
-	const header = Buffer.alloc(44);
-	const dataSize = pcmData.length;
-	const fileSize = 36 + dataSize;
-
-	// RIFF header
-	header.write("RIFF", 0);
-	header.writeUInt32LE(fileSize, 4);
-	header.write("WAVE", 8);
-
-	// fmt chunk
-	header.write("fmt ", 12);
-	header.writeUInt32LE(16, 16); // chunk size
-	header.writeUInt16LE(1, 20); // PCM format
-	header.writeUInt16LE(CHANNELS, 22);
-	header.writeUInt32LE(SAMPLE_RATE, 24);
-	header.writeUInt32LE(SAMPLE_RATE * CHANNELS * 2, 28); // byte rate
-	header.writeUInt16LE(CHANNELS * 2, 32); // block align
-	header.writeUInt16LE(16, 34); // bits per sample
-
-	// data chunk
-	header.write("data", 36);
-	header.writeUInt32LE(dataSize, 40);
-
-	return Buffer.concat([header, pcmData]);
-}
-
 // ─── Transcription via local server ──────────────────────────────────────────
 
 /**
@@ -737,7 +708,7 @@ export async function stopLocalSession(session: LocalSession, config: VoiceConfi
 
 		if (config.localEndpoint) {
 			// External server mode (advanced override)
-			const wavBuffer = createWavBuffer(pcmData);
+			const wavBuffer = encodeMonoPcm16leWav(pcmData, SAMPLE_RATE);
 			text = await transcribeWithServer(wavBuffer, config);
 		} else {
 			// In-process via sherpa-onnx (default, 120s timeout)

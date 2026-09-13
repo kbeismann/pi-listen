@@ -15,6 +15,7 @@ import {
 } from "./dock-status";
 import type { TalkAudioRoute } from "./pipewire-aec";
 import type { SpeechDetector } from "./sherpa-vad";
+import { isGeminiSttFallbackError } from "./stt-gemini";
 import { isGeminiTtsQuotaError } from "./tts-gemini";
 import { prepareForSpeech } from "./tts-text-filter";
 
@@ -55,7 +56,7 @@ export interface TalkModeDependencies {
 	prepareLocalSpeech(config: VoiceConfig, signal: AbortSignal): Promise<void>;
 	createSpeechDetector(config: VoiceConfig): SpeechDetector;
 	prepareAudio?(config: VoiceConfig, signal: AbortSignal): Promise<TalkAudioRoute>;
-	transcribe(pcm: Buffer, config: VoiceConfig): Promise<string>;
+	transcribe(pcm: Buffer, config: VoiceConfig, signal: AbortSignal): Promise<string>;
 	speak(
 		text: string,
 		config: VoiceConfig,
@@ -218,6 +219,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		speechDetector: undefined as SpeechDetector | undefined,
 		prepareAbort: undefined as AbortController | undefined,
 		transcription: undefined as Promise<void> | undefined,
+		transcriptionAbort: undefined as AbortController | undefined,
 		speechAbort: undefined as AbortController | undefined,
 		speechEpoch: 0,
 		speechTail: Promise.resolve(),
@@ -602,8 +604,14 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 	): Promise<void> {
 		if (!state.enabled || state.lifecycleEpoch !== epoch || !state.config) return;
 		setPhase("transcribing");
+		const controller = new AbortController();
+		state.transcriptionAbort = controller;
 		try {
-			const text = (await dependencies.transcribe(pcm, state.config)).trim();
+			const text = (await transcribeWithFallback(
+				pcm,
+				state.config,
+				controller,
+			)).trim();
 			if (!state.enabled || state.lifecycleEpoch !== epoch) return;
 			if (!text || (options.verifyBeforeInterrupting && !isSubstantiveInterruption(text))) {
 				state.interruptionInProgress = false;
@@ -613,7 +621,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 				return;
 			}
 			// The audio ended before transcription began, so it cannot be echo
-			// from playback that started while local STT was running.
+			// from playback that started while STT was running.
 			if (options.verifyBeforeInterrupting) interruptSpeechForBargeIn({ ignorePlaybackGuard: true });
 			if (state.interruptionInProgress) state.pendingBargeTurn = true;
 			setPhase("thinking");
@@ -626,6 +634,43 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			notify(state.ctx, `Talk transcription failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 			setPhase(readyPhase());
 			if (state.inputEnabled) startCapture();
+		} finally {
+			if (state.transcriptionAbort === controller) state.transcriptionAbort = undefined;
+		}
+	}
+
+	async function transcribeWithFallback(
+		pcm: Buffer,
+		config: VoiceConfig,
+		controller: AbortController,
+	): Promise<string> {
+		try {
+			return await dependencies.transcribe(pcm, config, controller.signal);
+		} catch (error) {
+			if (
+				controller.signal.aborted
+				|| config.talk.sttBackend !== "gemini"
+				|| !isGeminiSttFallbackError(error)
+			) throw error;
+
+			// The cloned Talk config belongs only to this enable/disable cycle.
+			// Keep subsequent utterances local after a transient Gemini failure,
+			// while a Talk restart retries the user's configured remote backend.
+			config.talk.sttBackend = "local";
+			notify(
+				state.ctx,
+				`Gemini STT unavailable; using local STT ${config.talk.sttModel} until Talk restarts.`,
+				"warning",
+			);
+			try {
+				return await dependencies.transcribe(pcm, config, controller.signal);
+			} catch (localError) {
+				if ((localError as Error)?.name === "AbortError") throw localError;
+				throw new Error(
+					`Gemini STT failed and local fallback ${config.talk.sttModel} also failed: `
+					+ (localError instanceof Error ? localError.message : String(localError)),
+				);
+			}
 		}
 	}
 
@@ -867,6 +912,7 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		state.utteranceInterruption = undefined;
 		setPhase("stopping", ctx);
 		state.prepareAbort?.abort();
+		state.transcriptionAbort?.abort();
 		cancelSpeechQueue();
 		state.speechAbort = undefined;
 		stopCapture("SIGKILL");
@@ -1317,11 +1363,14 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 		const ttsStatus = config.ttsBackend === "gemini"
 			? `Gemini ${config.ttsGeminiModel}, voice ${config.ttsGeminiVoiceId}`
 			: `local ${config.ttsModel}, voice ${config.ttsVoiceId}`;
+		const sttStatus = config.sttBackend === "gemini"
+			? `Gemini ${config.sttGeminiModel}`
+			: `local ${config.sttModel}`;
 		return [
 			`Talk mode: ${state.enabled ? state.phase : "off"}`,
 			`input: ${state.requestedInputEnabled ? "on" : "off"}${state.inputPreemptionLeases > 0 ? " (capture preempted)" : ""}`,
 			`output: ${state.outputEnabled ? "on" : "off"}`,
-			`STT: local ${config.sttModel}`,
+			`STT: ${sttStatus}`,
 			"speech validation: local Silero VAD",
 			`TTS: ${ttsStatus}`,
 			`barge-in: ${bargeInStatus}`,

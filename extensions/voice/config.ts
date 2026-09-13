@@ -28,11 +28,17 @@ export interface VoiceOnboardingState {
 export type VoiceBackend = "deepgram" | "local";
 
 export type TalkBargeInMode = "off" | "headphones" | "pipewire-aec";
+export type TalkSttBackend = "local" | "gemini";
 export type TalkTtsBackend = "local" | "gemini";
 
 export interface ContinuousTalkConfig {
-	/** Local transcription model used by the hands-free conversation loop. */
+	/** Select local transcription or the paid Gemini Developer API. */
+	sttBackend: TalkSttBackend;
+	/** Local transcription model retained as Gemini's session fallback. */
 	sttModel: string;
+	/** Cheapest Gemini unary transcription model and up to 100 technical terms. */
+	sttGeminiModel: string;
+	sttGeminiVocabulary: string[];
 	/** Select local synthesis or the paid Gemini Developer API. */
 	ttsBackend: TalkTtsBackend;
 	/** Local synthesis model retained for explicit offline operation. */
@@ -140,7 +146,7 @@ export interface VoiceConfig {
 	 * don't re-spam the same notification. New in v7.0.0.
 	 */
 	ttsOnboardingShown?: boolean;
-	/** Hands-free, local-audio conversation settings for /talk. */
+	/** Hands-free conversation settings; capture and speech validation stay local. */
 	talk: ContinuousTalkConfig;
 }
 
@@ -154,6 +160,8 @@ export interface LoadedVoiceConfig {
 export interface ConfigPathOptions {
 	agentDir?: string;
 }
+
+export const DEFAULT_GEMINI_STT_MODEL = "gemini-3.5-transcribe";
 
 export const DEFAULT_CONFIG: VoiceConfig = {
 	version: VOICE_CONFIG_VERSION,
@@ -179,7 +187,10 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	ttsDeepgramStreaming: false,
 	ttsOnboardingShown: false,
 	talk: {
+		sttBackend: "local",
 		sttModel: "parakeet-v3",
+		sttGeminiModel: DEFAULT_GEMINI_STT_MODEL,
+		sttGeminiVocabulary: [],
 		ttsBackend: "local",
 		ttsModel: "kokoro-en-v0_19",
 		ttsVoiceId: 0,
@@ -237,6 +248,7 @@ function normalizeOnboarding(input: any, fallbackCompleted: boolean): VoiceOnboa
 }
 
 const TALK_BARGE_IN_MODES = new Set<TalkBargeInMode>(["off", "headphones", "pipewire-aec"]);
+const TALK_STT_BACKENDS = new Set<TalkSttBackend>(["local", "gemini"]);
 const TALK_TTS_BACKENDS = new Set<TalkTtsBackend>(["local", "gemini"]);
 
 function finiteInRange(value: unknown, fallback: number, min: number, max: number): number {
@@ -245,14 +257,39 @@ function finiteInRange(value: unknown, fallback: number, min: number, max: numbe
 		: fallback;
 }
 
+function normalizeTalkVocabulary(input: unknown): string[] {
+	if (!Array.isArray(input)) return [];
+	const terms: string[] = [];
+	const seen = new Set<string>();
+	for (const value of input) {
+		if (typeof value !== "string") continue;
+		const term = value.trim();
+		if (!term || seen.has(term)) continue;
+		seen.add(term);
+		terms.push(term);
+		// Google's guidance says custom vocabularies work best at 100 terms or
+		// fewer. Bound managed config there rather than silently creating a less
+		// predictable and more expensive request.
+		if (terms.length === 100) break;
+	}
+	return terms;
+}
+
 function normalizeTalkConfig(input: any): ContinuousTalkConfig {
 	const defaults = DEFAULT_CONFIG.talk;
 	const rawBargeIn = input?.bargeIn;
 	const rawVad = input?.vad;
 	return {
+		sttBackend: TALK_STT_BACKENDS.has(input?.sttBackend)
+			? input.sttBackend
+			: defaults.sttBackend,
 		sttModel: typeof input?.sttModel === "string" && input.sttModel.trim()
 			? input.sttModel.trim()
 			: defaults.sttModel,
+		sttGeminiModel: typeof input?.sttGeminiModel === "string" && input.sttGeminiModel.trim()
+			? input.sttGeminiModel.trim()
+			: defaults.sttGeminiModel,
+		sttGeminiVocabulary: normalizeTalkVocabulary(input?.sttGeminiVocabulary),
 		ttsBackend: TALK_TTS_BACKENDS.has(input?.ttsBackend)
 			? input.ttsBackend
 			: defaults.ttsBackend,
