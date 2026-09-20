@@ -185,6 +185,15 @@ describe("continuous talk mode", () => {
 		expect(TALK_SYSTEM_PROMPT).toContain("explicitly asks for a longer, detailed, or step-by-step answer");
 	});
 
+	test("acknowledges longer work without ending the request or bypassing approval", () => {
+		expect(TALK_SYSTEM_PROMPT).toContain("Before longer investigation or tool-assisted work");
+		expect(TALK_SYSTEM_PROMPT).toContain("give one brief, natural acknowledgement");
+		expect(TALK_SYSTEM_PROMPT).toContain("continue working on the request without waiting for another user message");
+		expect(TALK_SYSTEM_PROMPT).toContain("an interim response, not the completed answer");
+		expect(TALK_SYSTEM_PROMPT).toContain("For quick answers, respond directly");
+		expect(TALK_SYSTEM_PROMPT).toContain("Existing clarification and approval gates still apply");
+	});
+
 	test("allows short inline Markdown links required by another active layer", () => {
 		expect(TALK_SYSTEM_PROMPT).toContain("short inline links another active layer requires");
 		expect(TALK_SYSTEM_PROMPT).toContain("converts those links to natural labels");
