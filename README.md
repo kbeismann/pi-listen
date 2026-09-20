@@ -177,6 +177,7 @@ Talk mode defaults to speaker-safe playback. It closes microphone capture before
 The mode is isolated from ordinary Pi turns:
 
 - Its conversational system prompt defaults to roughly three or four spoken sentences without headings, lists, tables, or code-heavy text. The default is soft: explicit requests for detail and answers that genuinely require more context can run longer.
+- Before longer investigation or tool-assisted work, the prompt asks for one brief acknowledgement followed by continued work without another user message. Quick answers stay direct, and clarification and approval gates still apply. This prompt-only guidance improves conversational flow but cannot guarantee an acknowledgement before the model's initial reasoning.
 - When a response is interrupted, later turns see only the completed spoken prefix plus an interruption marker, not generated text the user never heard.
 - It leaves active tools and permission enforcement to the surrounding Pi session; Talk neither grants nor removes authority.
 - It uses Pi's active model and thinking level unchanged.

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Acknowledgement before longer Talk work** - the conversation prompt asks for
+  one brief interim acknowledgement before investigation or tool-assisted work,
+  then continued work without another user message. Quick answers stay direct
+  and existing clarification and approval gates remain in force. The prompt-only
+  change adds no model calls or playback timers and cannot guarantee when the
+  model first speaks.
+
 ### Fixed
 
 - **Sticky local fallback for Gemini quota exhaustion** — an HTTP 429 now
