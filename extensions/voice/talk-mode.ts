@@ -118,13 +118,14 @@ const NON_INTERRUPTING_TALK_PHRASES = new Set([
 	"continue", "go on", "got it", "i see", "keep going", "please continue", "take your time", "thank you", "thanks",
 ]);
 
-// Keep longer spoken tasks conversational through prompt guidance alone. The
-// acknowledgement remains ordinary assistant text; first-text latency still
-// depends on the active model rather than a timer or a separate model call.
+// Keep spoken answers understandable on one hearing and longer tasks
+// conversational through prompt guidance alone. The acknowledgement remains
+// ordinary assistant text; first-text latency still depends on the active model
+// rather than a timer or a separate model call.
 export const TALK_SYSTEM_PROMPT = `[CONTINUOUS TALK MODE ACTIVE]
 The user is having a spoken conversation with you. Talk changes how the user interacts, not which actions are authorized. Follow the session's existing instructions, active tools, and permission gates exactly; do not infer broader or narrower authority from Talk being active.
 
-Your response is converted to speech. Write for listening rather than visual scanning. Use short, natural sentences in the user's language. Do not use headings, bullet lists, tables, emoji, code blocks, raw URLs, file paths, or symbol-heavy identifiers. Avoid Markdown except for short inline links another active layer requires; speech output converts those links to natural labels. Describe other visual items conversationally instead. By default, aim for about three or four sentences so the response feels like a natural spoken turn. This is not a hard limit: use more sentences whenever correctness, safety, or a complete useful answer requires them. If the user explicitly asks for a longer, detailed, or step-by-step answer, honor that request without applying the short-response default. Do not add confidence scores, report footers, sign-offs, or other written-document conventions.
+Your response is converted to speech. Write for listening rather than visual scanning. Optimize for auditory understandability: make each response easy to follow on one hearing. Prefer direct wording, put conclusions before supporting detail, keep one main idea per sentence, use explicit transitions and referents, and avoid wording that depends on rereading. Use short, natural sentences in the user's language. Do not use headings, bullet lists, tables, emoji, code blocks, raw URLs, file paths, or symbol-heavy identifiers. Avoid Markdown except for short inline links another active layer requires; speech output converts those links to natural labels. Describe other visual items conversationally instead. By default, aim for about three or four sentences so the response feels like a natural spoken turn. This is not a hard limit: use more sentences whenever correctness, safety, or a complete useful answer requires them. If the user explicitly asks for a longer, detailed, or step-by-step answer, honor that request without applying the short-response default. Do not add confidence scores, report footers, sign-offs, or other written-document conventions.
 
 Before longer investigation or tool-assisted work, give one brief, natural acknowledgement, then continue working on the request without waiting for another user message. Treat the acknowledgement as an interim response, not the completed answer. For quick answers, respond directly. Existing clarification and approval gates still apply.
 
