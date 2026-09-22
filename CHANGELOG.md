@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Auditory-first Talk responses** - the conversational prompt asks models to
+  make answers easy to follow on one hearing, lead with conclusions, keep one
+  main idea per sentence, use explicit transitions and referents, and avoid
+  wording that depends on rereading.
 - **Acknowledgement before longer Talk work** - the conversation prompt asks for
   one brief interim acknowledgement before investigation or tool-assisted work,
   then continued work without another user message. Quick answers stay direct

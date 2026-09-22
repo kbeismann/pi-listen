@@ -179,6 +179,15 @@ function makeHarness(options: Partial<TalkModeDependencies> = {}) {
 }
 
 describe("continuous talk mode", () => {
+	test("optimizes responses for one-hearing auditory understanding", () => {
+		expect(TALK_SYSTEM_PROMPT).toContain("Optimize for auditory understandability");
+		expect(TALK_SYSTEM_PROMPT).toContain("easy to follow on one hearing");
+		expect(TALK_SYSTEM_PROMPT).toContain("put conclusions before supporting detail");
+		expect(TALK_SYSTEM_PROMPT).toContain("keep one main idea per sentence");
+		expect(TALK_SYSTEM_PROMPT).toContain("explicit transitions and referents");
+		expect(TALK_SYSTEM_PROMPT).toContain("avoid wording that depends on rereading");
+	});
+
 	test("uses a soft short-response default that explicit detail requests override", () => {
 		expect(TALK_SYSTEM_PROMPT).toContain("aim for about three or four sentences");
 		expect(TALK_SYSTEM_PROMPT).toContain("This is not a hard limit");
