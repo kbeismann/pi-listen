@@ -234,7 +234,7 @@ describe("continuous talk mode", () => {
 		const activeLine = widget.render(72)[0];
 		const plainActiveLine = activeLine.replace(/\x1b\[[0-9;]*m/g, "");
 		expect(activeLine).toBe(
-			"\x1b[0;1;37;44mtalk: on | phase: listening | output: on | input: on\x1b[0m",
+			"\x1b[0;1;38;2;0;0;0;48;2;255;0;255mtalk: on | phase: listening | output: on | input: on\x1b[0m",
 		);
 		expect(plainActiveLine.trim()).toBe(
 			"talk: on | phase: listening | output: on | input: on",
