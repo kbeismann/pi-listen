@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Blue Talk footer** - the complete Talk status row uses a blue background
+  with light text, distinct from Relay's red/green lifecycle indicators. Status
+  labels, width-safe truncation, and style resets remain unchanged.
 - **Auditory-first Talk responses** - the conversational prompt asks models to
   make answers easy to follow on one hearing, lead with conclusions, keep one
   main idea per sentence, use explicit transitions and referents, and avoid

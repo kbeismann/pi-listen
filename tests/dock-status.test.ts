@@ -45,16 +45,18 @@ function makeContext(mode: "tui" | "rpc") {
 }
 
 describe("bottom-dock status formatting", () => {
-	test("formats Talk in lowercase key-value text and highlights the complete row", () => {
+	test("formats Talk in lowercase key-value text on a blue background", () => {
 		const line = formatTalkWidgetLine("standby", false, false, 120);
 		expect(stripAnsi(line)).toBe("talk: on | phase: standby | output: off | input: off");
 		expect(line).toBe(
-			"\x1b[0;1;38;2;0;0;0;48;2;255;0;255mtalk: on | phase: standby | output: off | input: off\x1b[0m",
+			"\x1b[0;1;37;44mtalk: on | phase: standby | output: off | input: off\x1b[0m",
 		);
 		expect(stripAnsi(formatTalkStatus("LISTENING", true, true))).toBe(
 			"talk: on | phase: listening | output: on | input: on",
 		);
+		expect(formatTalkStatus("LISTENING", true, true)).toStartWith("\x1b[0;1;37;44m");
 		const narrowLine = formatTalkWidgetLine("standby", false, false, 20);
+		expect(narrowLine).toStartWith("\x1b[0;1;37;44m");
 		expect(stripAnsi(narrowLine).length).toBeLessThanOrEqual(20);
 		expect(narrowLine).toEndWith("\x1b[0m");
 	});

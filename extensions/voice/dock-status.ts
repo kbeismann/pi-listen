@@ -3,7 +3,9 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 export const TALK_DOCK_KEY = "continuous-talk";
 export const VOICE_DOCK_KEY = "voice";
 
-const TALK_MODE_HIGHLIGHT = "\x1b[0;1;38;2;0;0;0;48;2;255;0;255m";
+// Blue identifies Talk independently of Relay's red/green lifecycle health.
+// A light foreground keeps the complete row readable on terminal blue.
+const TALK_MODE_HIGHLIGHT = "\x1b[0;1;37;44m";
 const ANSI_RESET = "\x1b[0m";
 
 export interface DockTheme {
@@ -61,7 +63,7 @@ export function formatTalkStatus(
 	return `${TALK_MODE_HIGHLIGHT}${text}${ANSI_RESET}`;
 }
 
-/** Format Talk's complete one-line TUI state with its magenta marker. */
+/** Format Talk's complete one-line TUI state with its blue marker. */
 export function formatTalkWidgetLine(
 	phase: string,
 	outputEnabled: boolean,
@@ -121,8 +123,7 @@ export function formatVoiceWidgetLine(status: VoiceDockStatus, width: number, th
  * The managed Pi configuration pins this package and combines these Talk and
  * voice rows with locally owned session, role, persona, supervisor, and Relay
  * rows. Coordinate presentation-contract changes with that configuration and
- * its package pin; Relay's distinct cyan highlighted row belongs to its owning
- * package.
+ * its package pin; Relay's lifecycle-colored row belongs to its owning package.
  */
 export class PersistentDockStatus {
 	private widgetUi: DockUi | undefined;
