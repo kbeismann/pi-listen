@@ -2269,24 +2269,22 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	// Diagnostic: stream log shows when message_update / message_end
-	// actually fire (some Pi versions don't emit message_update
-	// per-token). Lets us verify the streaming path is alive.
-	const streamDiag = (s: string) => {
-		try {
-			const fs2 = require("node:fs") as typeof import("node:fs");
-			fs2.appendFileSync("/tmp/pi-listen-stream.log", `[${new Date().toISOString()}] ${s}\n`);
-		} catch { /* best-effort */ }
-	};
-	let mu_count = 0;
+	// Keep emission-cadence diagnostics behind the explicit debug switch. A
+	// production append on every update competes with audio when the host is
+	// already saturated.
+	let messageUpdateCount = 0;
 	pi.on("message_update", async (event) => {
 		const msg = (event as any)?.message;
 		if (!msg || msg.role !== "assistant") return;
 		const id = (msg.id as string) || "current";
 		const fullText = extractAccumulatedText(msg);
-		mu_count++;
-		if (mu_count <= 5 || mu_count % 10 === 0) {
-			streamDiag(`message_update #${mu_count} id=${id} chars=${fullText.length}`);
+		messageUpdateCount++;
+		if (messageUpdateCount <= 5 || messageUpdateCount % 10 === 0) {
+			voiceDebug("message_update", {
+				count: messageUpdateCount,
+				id,
+				chars: fullText.length,
+			});
 		}
 		await maybeSpeakNew(id, fullText, false);
 	});
@@ -2296,8 +2294,12 @@ export default function (pi: ExtensionAPI) {
 		if (!msg || msg.role !== "assistant") return;
 		const id = (msg.id as string) || "current";
 		const fullText = extractAccumulatedText(msg);
-		streamDiag(`message_end id=${id} chars=${fullText.length} updates_seen=${mu_count}`);
-		mu_count = 0;
+		voiceDebug("message_end", {
+			id,
+			chars: fullText.length,
+			updatesSeen: messageUpdateCount,
+		});
+		messageUpdateCount = 0;
 		await maybeSpeakNew(id, fullText, true);
 		// Drop the stream state once flushed — prevents unbounded growth.
 		const state = messageStreams.get(id);

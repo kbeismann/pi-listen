@@ -174,6 +174,12 @@ Talk can start with input and output independently disabled. The input and outpu
 
 Talk mode defaults to speaker-safe playback. It closes microphone capture before TTS playback, preventing the assistant's own voice from becoming the next user utterance. Set `bargeIn.mode` to `headphones` only when using headphones. In that mode capture remains active during playback. Continuous speech cancels playback after `bargeIn.minSpeechMs`; it never aborts the current model run or tool work. Shorter playback-time utterances are ignored rather than submitted as steering. The completed utterance is transcribed after the user stops speaking and queued as steering for Pi's next safe agent boundary. While the model is only thinking, `/talk` first finishes and transcribes the utterance locally; empty captures and brief backchannels such as “mm-hmm” leave the response running. On Linux, `pipewire-aec` instead creates a temporary WebRTC echo-cancellation source and sink for `/talk`, allowing the same interruption behavior over speakers. If the route cannot be created, talk mode reports the failure and falls back to speaker-safe playback. Microphone audio never leaves the machine; only the resulting text is sent to the configured Pi model.
 
+On WSL without a named echo-canceling sink, TTS sends each complete synthesized
+WAV clip to native Windows SoundPlayer instead of streaming it through WSLg
+PulseAudio. Buffered native playback avoids underruns when the Windows host is
+heavily loaded. An explicit `pipewire-aec` route keeps using its named PulseAudio
+sink so echo cancellation remains intact.
+
 The mode is isolated from ordinary Pi turns:
 
 - Its conversational system prompt defaults to roughly three or four spoken sentences without headings, lists, tables, or code-heavy text. The default is soft: explicit requests for detail and answers that genuinely require more context can run longer.

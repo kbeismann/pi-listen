@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Choppy WSL speech under host load** — WSL now sends complete synthesized
+  WAV clips to native Windows SoundPlayer when no named echo-canceling sink is
+  active. This bypasses WSLg's starvation-prone PulseAudio playback stream
+  while preserving explicit PipeWire routing. Production playback also stops
+  synchronously appending per-chunk and message-event diagnostics.
 - **Handoffs to active targets** — a live target remains selectable while it is
   processing a turn. Talk waits for the target to settle without preempting its
   work instead of rejecting the request and asking the user to try again.
