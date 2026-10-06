@@ -1,16 +1,17 @@
 /**
- * TTS audio playback — write WAV to a temp file, spawn a platform player,
- * abort cleanly on signal. v6.0 ships file-based playback for simplicity;
- * stdin-streaming for sub-200ms TTFB is a v6.1 optimization.
+ * TTS audio playback — hand a complete WAV to a platform player and abort
+ * cleanly on signal. Most players read a private temp file. WSL instead pipes
+ * the WAV to Windows PowerShell so SoundPlayer can buffer it in Windows memory
+ * and bypass WSLg's PulseAudio stream under host load.
  *
  * Both backends produce a complete WAV blob:
  *   - Local engine returns Float32Array PCM → encoded to WAV here
  *   - Deepgram REST returns WAV bytes directly (container=wav)
  *
- * Concurrency contract: each play() call owns its own temp file. Two
- * concurrent calls write to distinct UUID-named files and spawn distinct
- * player processes. The caller is responsible for serializing if it
- * doesn't want overlapping audio (the speak orchestrator does this).
+ * Concurrency contract: each play() call owns its player process and, for
+ * file-based players, its own temp file. The caller is responsible for
+ * serializing if it doesn't want overlapping audio (the speak orchestrator
+ * does this).
  *
  * Security model:
  *   - Player invoked via `child_process.spawn(cmd, [args])` — argument
@@ -19,8 +20,10 @@
  *   - Windows uses an env-var indirection ($env:PI_SPEAK_PATH) so paths
  *     containing single quotes (e.g. C:\Users\O'Neil\...) cannot inject
  *     into the PowerShell command string.
+ *   - WSL's PowerShell command is fixed and receives WAV bytes through stdin;
+ *     neither audio nor user-controlled text enters the command string.
  *   - Temp filenames are randomUUID — no user input in the name.
- *   - Files are written 0600 and asserted to live under os.tmpdir().
+ *   - Temp files are written 0600 and asserted to live under os.tmpdir().
  *   - Cleanup uses a single-ownership token: the playback Promise's
  *     `finally` block is the ONLY code path that unlinks. Abort kills
  *     the player but leaves cleanup to that finally.
@@ -55,6 +58,18 @@ export interface PlayOpts {
 	playerOverride?: PlayerSpec;
 }
 
+export interface PlayerSpec {
+	cmd: string;
+	args: (path: string) => string[];
+	/** Complete WAV bytes are piped to stdin instead of written to a temp file. */
+	transport?: "file" | "stdin-wav";
+	/**
+	 * Optional environment variables. The native Windows player uses this to
+	 * pass the path without interpolating it into the PowerShell command.
+	 */
+	env?: (path: string) => NodeJS.ProcessEnv;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -76,12 +91,14 @@ export async function play(opts: PlayOpts): Promise<void> {
 	const wav = "wav" in source
 		? source.wav
 		: encodeWav(source.samples, source.sampleRate);
-
-	const tmpFile = createTempWavPath();
+	const player = opts.playerOverride ?? choosePlayer(opts.pulseSink);
+	const usesStdin = player.transport === "stdin-wav";
+	const tmpFile = usesStdin ? undefined : createTempWavPath();
 	let cleanupDone = false;
 	const cleanup = () => {
 		if (cleanupDone) return;
 		cleanupDone = true;
+		if (!tmpFile) return;
 		try { fs.unlinkSync(tmpFile); } catch { /* may already be gone */ }
 	};
 
@@ -91,20 +108,23 @@ export async function play(opts: PlayOpts): Promise<void> {
 	// same finally. No double-delete possible.
 
 	try {
-		// Write the WAV with 0600 perms so other users on a multi-user box
-		// cannot read TTS output (transcripts can be sensitive even though
-		// they're agent-generated).
-		fs.writeFileSync(tmpFile, wav, { mode: 0o600 });
+		if (tmpFile) {
+			// Write the WAV with 0600 perms so other users on a multi-user box
+			// cannot read TTS output (transcripts can be sensitive even though
+			// they're agent-generated).
+			fs.writeFileSync(tmpFile, wav, { mode: 0o600 });
+		}
 
 		// Re-check abort after the sync write — if user hit Escape during
 		// the write, no point spawning the player.
 		if (signal?.aborted) throw makeAbortError();
 
-		const player = opts.playerOverride ?? choosePlayer(opts.pulseSink);
-		const env = player.env ? { ...process.env, ...player.env(tmpFile) } : process.env;
+		const env = player.env && tmpFile
+			? { ...process.env, ...player.env(tmpFile) }
+			: process.env;
 
-		const proc: ChildProcess = spawn(player.cmd, player.args(tmpFile), {
-			stdio: ["ignore", "ignore", "pipe"], // capture stderr for error messages
+		const proc: ChildProcess = spawn(player.cmd, player.args(tmpFile ?? ""), {
+			stdio: [usesStdin ? "pipe" : "ignore", "ignore", "pipe"],
 			env,
 			// Node's native abort plumbing — when `signal` aborts, Node
 			// kills the child process atomically. Single source of kills,
@@ -113,7 +133,7 @@ export async function play(opts: PlayOpts): Promise<void> {
 			...(signal ? { signal } : {}),
 		});
 
-		await new Promise<void>((resolve, reject) => {
+		const completion = new Promise<void>((resolve, reject) => {
 			// Node can emit BOTH "error" (with AbortError) and "close" for
 			// the same termination — the order is racy. `settled` ensures
 			// exactly one settlement reaches the await.
@@ -170,6 +190,16 @@ export async function play(opts: PlayOpts): Promise<void> {
 				});
 			});
 		});
+
+		if (usesStdin) {
+			// SoundPlayer starts only after PowerShell has copied stdin into its
+			// seekable MemoryStream. Backpressure therefore delays startup rather
+			// than starving audio that is already playing.
+			proc.stdin?.on("error", () => { /* close/error reports player failure */ });
+			proc.stdin?.end(wav);
+		}
+
+		await completion;
 	} finally {
 		cleanup();
 	}
@@ -219,8 +249,9 @@ export interface OpenPlaybackStreamOpts {
  * `play()` path. Linux prefers native `paplay`; macOS prefers `ffplay`; other
  * Unix-like systems fall back to `sox`.
  *
- * Windows is intentionally unsupported here — PowerShell SoundPlayer
- * can't accept piped PCM. Windows users get the file-based fallback.
+ * Windows is intentionally unsupported here. WSL also declines streaming
+ * when Windows interop is available, so its caller can hand SoundPlayer a
+ * complete WAV instead of depending on WSLg's finite PulseAudio buffer.
  */
 export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream | null {
 	const { sampleRate, signal } = opts;
@@ -237,20 +268,6 @@ export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream
 		stdio: ["pipe", "ignore", "pipe"],
 		...(signal ? { signal } : {}),
 	});
-
-	// v7.1.3 diagnostic: append every byte-count + lifecycle event to a
-	// stable log path so production truncation issues can be diagnosed
-	// without re-running with PI_VOICE_DEBUG. Best-effort — silently
-	// drops if /tmp isn't writable.
-	const diagLog = (s: string) => {
-		try {
-			const fs2 = require("node:fs") as typeof import("node:fs");
-			fs2.appendFileSync("/tmp/pi-listen-stream.log", `[${new Date().toISOString()}] ${s}\n`);
-		} catch { /* best-effort */ }
-	};
-	diagLog(`opened ${player.cmd} sampleRate=${sampleRate} pid=${proc.pid}`);
-	let totalBytesAccepted = 0;
-	let totalWrites = 0;
 
 	let stderr = "";
 	const STDERR_CAP = 2048;
@@ -283,7 +300,6 @@ export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream
 			});
 		});
 		proc.on("close", (code, sig) => {
-			diagLog(`proc.close code=${code} sig=${sig} cancelled=${cancelled} aborted=${signal?.aborted}`);
 			settle(() => {
 				if (cancelled || signal?.aborted) {
 					reject(makeAbortError());
@@ -322,17 +338,12 @@ export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream
 
 	const writeOne = async (view: Uint8Array): Promise<void> => {
 		if (!proc.stdin || proc.stdin.destroyed) {
-			diagLog(`writeOne: stdin destroyed, dropping ${view.byteLength} bytes`);
 			return;
 		}
-		totalWrites++;
-		totalBytesAccepted += view.byteLength;
-		diagLog(`writeOne[${totalWrites}]: ${view.byteLength} bytes (total ${totalBytesAccepted})`);
 
 		// Slice-and-write loop with backpressure awareness.
 		for (let off = 0; off < view.byteLength; off += CHUNK_BYTES) {
 			if (!proc.stdin || proc.stdin.destroyed) {
-				diagLog(`writeOne: stdin destroyed mid-chunk at offset ${off}`);
 				return;
 			}
 			const slice = view.subarray(off, Math.min(off + CHUNK_BYTES, view.byteLength));
@@ -368,7 +379,6 @@ export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream
 		async end(): Promise<void> {
 			if (ended) return;
 			ended = true;
-			diagLog(`end() called — awaiting ${totalWrites} writes (${totalBytesAccepted} bytes)`);
 			// Drain all pending writes before signaling EOF.
 			try { await writeTail; } catch { /* swallowed */ }
 			// CoreAudio players can drop buffered audio when stdin reaches EOF,
@@ -381,13 +391,11 @@ export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream
 					await writeOne(new Uint8Array(silence.buffer, silence.byteOffset, silence.byteLength));
 				} catch { /* EPIPE ok */ }
 			}
-			diagLog(`end() — flush complete, calling stdin.end()`);
 			try { proc.stdin?.end(); } catch { /* already closed */ }
 		},
 		cancel(): void {
 			if (cancelled) return;
 			cancelled = true;
-			diagLog(`cancel() called after ${totalWrites} writes (${totalBytesAccepted} bytes)`);
 			try { proc.stdin?.destroy(); } catch {}
 			try { proc.kill("SIGTERM"); } catch {}
 		},
@@ -411,7 +419,13 @@ interface StreamingPlayerSpec {
 }
 
 function pickStreamingPlayer(sampleRate: number, pulseSink?: string): StreamingPlayerSpec | null {
-	return selectStreamingPlayer(process.platform, sampleRate, pulseSink, binaryAvailable);
+	return selectStreamingPlayer(
+		process.platform,
+		sampleRate,
+		pulseSink,
+		binaryAvailable,
+		isWslRuntime(),
+	);
 }
 
 /** Pure platform selection kept separate so Linux cannot regress to the macOS player path. */
@@ -420,6 +434,7 @@ export function selectStreamingPlayer(
 	sampleRate: number,
 	pulseSink: string | undefined,
 	isAvailable: (command: string) => boolean,
+	runningUnderWsl = false,
 ): StreamingPlayerSpec | null {
 	// A named sink is part of the echo-cancellation contract. Prefer paplay
 	// because its device selection is explicit instead of relying on an audio
@@ -442,6 +457,13 @@ export function selectStreamingPlayer(
 	// talk setup requires paplay, and this guard keeps routing safe if the
 	// executable disappears after setup.
 	if (pulseSink) return null;
+	// WSLg's PulseAudio bridge can stop draining for several seconds when the
+	// host is CPU- or memory-saturated. A finite Pulse buffer then underruns and
+	// makes Talk choppy. Prefer complete-message Windows SoundPlayer playback;
+	// if Windows interop is unavailable, retain the ordinary Linux fallback.
+	if (platform === "linux" && runningUnderWsl && isAvailable("powershell.exe")) {
+		return null;
+	}
 	// PulseAudio is the native WSL/Linux path. ffplay's input clock can fall
 	// far behind real time while a Pulse microphone capture is active, turning
 	// a short utterance into severe stuttering that lasts for minutes.
@@ -501,14 +523,34 @@ function binaryAvailable(cmd: string): boolean {
 	const cached = _binaryCache.get(cmd);
 	if (cached !== undefined) return cached;
 	try {
-		const r = spawnSync(cmd, ["--version"], { stdio: "ignore" });
-		const ok = r.status === 0 || r.status === 1; // some tools return 1 for --version
+		// Starting Windows PowerShell merely to probe it adds about a second to
+		// the first WSL utterance. WSL exposes Windows executables on PATH, so a
+		// local lookup is sufficient; the real spawn still reports interop errors.
+		const usesPathLookup = process.platform === "linux" && cmd.endsWith(".exe");
+		const result = usesPathLookup
+			? undefined
+			: spawnSync(cmd, ["--version"], { stdio: "ignore" });
+		const ok = usesPathLookup
+			? executableOnPath(cmd)
+			: result?.status === 0 || result?.status === 1; // some tools return 1 for --version
 		_binaryCache.set(cmd, ok);
 		return ok;
 	} catch {
 		_binaryCache.set(cmd, false);
 		return false;
 	}
+}
+
+function executableOnPath(command: string): boolean {
+	for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+		if (!directory) continue;
+		const candidate = path.join(directory, command);
+		try {
+			fs.accessSync(candidate, fs.constants.X_OK);
+			if (fs.statSync(candidate).isFile()) return true;
+		} catch { /* keep searching */ }
+	}
+	return false;
 }
 
 /** Helper — convert Float32 [-1, 1] PCM to Int16 with NaN guard + clamp. */
@@ -525,17 +567,6 @@ export function float32ToInt16(samples: Float32Array): Int16Array {
 
 // ─── Player selection ─────────────────────────────────────────────────────────
 
-interface PlayerSpec {
-	cmd: string;
-	args: (path: string) => string[];
-	/**
-	 * Optional environment variables. The Windows player uses this to pass
-	 * the path via $env:PI_SPEAK_PATH instead of substituting it into the
-	 * PowerShell command string — defeats injection via paths containing `'`.
-	 */
-	env?: (path: string) => NodeJS.ProcessEnv;
-}
-
 /**
  * Choose a platform-appropriate player. Throws with an actionable message
  * if no player is recognized — the message guides the user to install
@@ -547,7 +578,43 @@ interface PlayerSpec {
  * with aplay. See the inline comment on linuxPlayer below.
  */
 function choosePlayer(pulseSink?: string): PlayerSpec {
-	switch (process.platform) {
+	return selectPlaybackPlayer(
+		process.platform,
+		pulseSink,
+		isWslRuntime(),
+		binaryAvailable,
+	);
+}
+
+/** Pure player selection so WSL routing can be regression-tested off WSL. */
+export function selectPlaybackPlayer(
+	platform: NodeJS.Platform,
+	pulseSink: string | undefined,
+	runningUnderWsl: boolean,
+	isAvailable: (command: string) => boolean,
+): PlayerSpec {
+	if (
+		platform === "linux"
+		&& runningUnderWsl
+		&& !pulseSink
+		&& isAvailable("powershell.exe")
+	) {
+		return {
+			cmd: "powershell.exe",
+			transport: "stdin-wav",
+			args: () => [
+				"-NoProfile",
+				"-NonInteractive",
+				"-Command",
+				"$inputStream = [Console]::OpenStandardInput(); "
+				+ "$memory = [System.IO.MemoryStream]::new(); "
+				+ "$inputStream.CopyTo($memory); $memory.Position = 0; "
+				+ "$player = [System.Media.SoundPlayer]::new($memory); $player.PlaySync()",
+			],
+		};
+	}
+
+	switch (platform) {
 		case "darwin":
 			return {
 				cmd: "afplay",
@@ -571,10 +638,20 @@ function choosePlayer(pulseSink?: string): PlayerSpec {
 			};
 		default:
 			throw new Error(
-				`No audio player configured for platform: ${process.platform}. ` +
+				`No audio player configured for platform: ${platform}. ` +
 				`Supported: darwin, linux, win32.`,
 			);
 	}
+}
+
+/** Detect WSL without treating ordinary Linux as Windows-hosted playback. */
+export function isWslRuntime(
+	platform: NodeJS.Platform = process.platform,
+	release = os.release(),
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	return platform === "linux"
+		&& (/microsoft|wsl/i.test(release) || Boolean(env.WSL_INTEROP));
 }
 
 /**

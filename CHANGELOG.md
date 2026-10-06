@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Choppy WSL speech under host load** — WSL now buffers complete TTS output
+  and pipes the WAV to native Windows SoundPlayer when no named echo-canceling
+  sink is active. This bypasses WSLg's starvation-prone PulseAudio playback
+  stream while preserving explicit PipeWire routing. Production playback also
+  stops synchronously appending per-chunk and message-event diagnostics.
 - **Sticky local fallback for Gemini quota exhaustion** — an HTTP 429 now
   replays the affected response through the configured local TTS model and
   keeps Talk local for the rest of that session. Restarting Talk retries the

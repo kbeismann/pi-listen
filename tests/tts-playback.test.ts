@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { encodeWav, play, selectStreamingPlayer } from "../extensions/voice/tts-playback";
+import {
+	encodeWav,
+	isWslRuntime,
+	play,
+	selectPlaybackPlayer,
+	selectStreamingPlayer,
+} from "../extensions/voice/tts-playback";
 
 describe("encodeWav — WAV header correctness", () => {
 	test("standard 24kHz mono short clip", () => {
@@ -92,6 +98,83 @@ describe("play — abort signal handling", () => {
 		// If we get here the promise resolved.
 		expect(true).toBe(true);
 	});
+
+	test("stdin WAV transport sends the complete encoded clip", async () => {
+		const sampleCount = 10;
+		const expectedBytes = 44 + sampleCount * 2;
+		await play({
+			source: { samples: new Float32Array(sampleCount), sampleRate: 16000 },
+			playerOverride: {
+				cmd: process.execPath,
+				transport: "stdin-wav",
+				args: () => [
+					"-e",
+					`let bytes = 0;
+process.stdin.on("data", chunk => { bytes += chunk.length; });
+process.stdin.on("end", () => process.exit(bytes === ${expectedBytes} ? 0 : 1));`,
+				],
+			},
+		});
+	});
+
+	test("aborts an active stdin WAV player", async () => {
+		const controller = new AbortController();
+		const playback = play({
+			source: { samples: new Float32Array(10), sampleRate: 16000 },
+			signal: controller.signal,
+			playerOverride: {
+				cmd: process.execPath,
+				transport: "stdin-wav",
+				args: () => [
+					"-e",
+					`process.stdin.resume();
+process.stdin.on("end", () => setTimeout(() => process.exit(0), 10_000));`,
+				],
+			},
+		});
+		setTimeout(() => controller.abort(), 20);
+
+		await expect(playback).rejects.toThrow(/aborted/i);
+	});
+});
+
+describe("WSL playback selection", () => {
+	test("detects Microsoft kernels or WSL interop only on Linux", () => {
+		expect(isWslRuntime("linux", "6.6.0-microsoft-standard-WSL2", {})).toBe(true);
+		expect(isWslRuntime("linux", "6.6.0-generic", { WSL_INTEROP: "/run/WSL/1_interop" })).toBe(true);
+		expect(isWslRuntime("linux", "6.6.0-generic", {})).toBe(false);
+		expect(isWslRuntime("darwin", "microsoft", { WSL_INTEROP: "present" })).toBe(false);
+	});
+
+	test("uses Windows SoundPlayer with a complete WAV over stdin", () => {
+		const player = selectPlaybackPlayer("linux", undefined, true, () => true);
+
+		expect(player.cmd).toBe("powershell.exe");
+		expect(player.transport).toBe("stdin-wav");
+		expect(player.args("").join(" ")).toContain("OpenStandardInput");
+		expect(player.args("").join(" ")).toContain("PlaySync");
+	});
+
+	test("retains the named PulseAudio sink for echo cancellation", () => {
+		const player = selectPlaybackPlayer("linux", "talk_aec_sink", true, () => true);
+
+		expect(player.cmd).toBe("paplay");
+		expect(player.args("/tmp/audio.wav")).toEqual([
+			"--device=talk_aec_sink",
+			"/tmp/audio.wav",
+		]);
+	});
+
+	test("retains Linux playback when Windows interop is unavailable", () => {
+		const player = selectPlaybackPlayer(
+			"linux",
+			undefined,
+			true,
+			(command) => command !== "powershell.exe",
+		);
+
+		expect(player.cmd).toBe("paplay");
+	});
 });
 
 describe("streaming player selection", () => {
@@ -116,8 +199,46 @@ describe("streaming player selection", () => {
 			24_000,
 			"talk_aec_sink",
 			(command) => command !== "paplay",
+			true,
 		);
 
 		expect(player).toBeNull();
+	});
+
+	test("WSL uses complete-message playback when Windows interop is available", () => {
+		const player = selectStreamingPlayer(
+			"linux",
+			24_000,
+			undefined,
+			() => true,
+			true,
+		);
+
+		expect(player).toBeNull();
+	});
+
+	test("WSL keeps streaming through an available named PulseAudio sink", () => {
+		const player = selectStreamingPlayer(
+			"linux",
+			24_000,
+			"talk_aec_sink",
+			() => true,
+			true,
+		);
+
+		expect(player?.cmd).toBe("paplay");
+		expect(player?.args).toContain("--device=talk_aec_sink");
+	});
+
+	test("WSL retains paplay streaming when Windows interop is unavailable", () => {
+		const player = selectStreamingPlayer(
+			"linux",
+			24_000,
+			undefined,
+			(command) => command !== "powershell.exe",
+			true,
+		);
+
+		expect(player?.cmd).toBe("paplay");
 	});
 });
