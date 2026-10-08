@@ -1401,7 +1401,8 @@ describe("continuous talk mode", () => {
 			.join(" ");
 		expect(contextText).toContain("Heard sentence.");
 		expect(contextText).not.toContain("Unheard sentence.");
-		expect(contextText).toContain("remainder of the generated response was not heard");
+		expect(contextText).toContain("interpret their utterance against speech heard through this point");
+		expect(contextText).toContain("not later assistant or tool activity");
 		expect(harness.pi.entries).toHaveLength(1);
 
 		const restored = makeHarness();
@@ -1513,6 +1514,8 @@ describe("continuous talk mode", () => {
 		expect(firstText).toContain("First heard.");
 		expect(firstText).not.toContain("First unheard.");
 		expect(secondText).not.toContain("Second unheard.");
+		expect(secondText).toContain("already speaking before this response was heard");
+		expect(secondText).toContain("against preceding spoken context");
 		expect(harness.pi.entries).toHaveLength(2);
 		await harness.mode.disable(harness.context as any, { notify: false });
 	});
