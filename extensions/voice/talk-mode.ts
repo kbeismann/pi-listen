@@ -109,8 +109,8 @@ interface UtteranceInterruption {
 }
 
 const INTERRUPTION_ENTRY_TYPE = "pi-listen-talk-interruption";
-const INTERRUPTED_AFTER_SPEECH = "[The user interrupted here; the remainder of the generated response was not heard.]";
-const INTERRUPTED_BEFORE_SPEECH = "[The user interrupted before any of this response was heard.]";
+const INTERRUPTED_AFTER_SPEECH = "[The user began speaking here; interpret their utterance against speech heard through this point, not later assistant or tool activity.]";
+const INTERRUPTED_BEFORE_SPEECH = "[The user was already speaking before this response was heard; interpret their utterance against preceding spoken context, not this or later activity.]";
 const NON_INTERRUPTING_TALK_WORDS = new Set([
 	"ah", "er", "erm", "hm", "hmm", "huh", "mhm", "mm", "oh", "okay", "ok", "right", "sure", "uh", "um", "yeah", "yep", "yes",
 ]);
@@ -343,7 +343,8 @@ export function createTalkMode(pi: ExtensionAPI, dependencies: TalkModeDependenc
 			// Fully heard earlier messages need no marker. Always snapshot the
 			// latest message. Model generation deliberately continues after TTS is
 			// cancelled, but later provider deltas remain unheard and must not be
-			// added beyond the audible prefix in the next model context.
+			// added beyond the audible prefix in the next model context. The marker
+			// also anchors the user's utterance there despite intervening work.
 			if (key !== latestKey && stream.completedLength >= stream.latestText.length) continue;
 			const heardText = stream.latestText.slice(0, stream.completedLength);
 			state.interruptedMessages.set(key, heardText);
