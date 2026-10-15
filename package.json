@@ -51,13 +51,12 @@
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": ">=0.70.0",
-    "@mariozechner/pi-tui": ">=0.70.0"
+    "@mariozechner/pi-tui": ">=0.70.0",
+    "typebox": "*"
   },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "^0.70.5",
-    "@mariozechner/pi-tui": "^0.70.5"
-  },
-  "dependencies": {
+    "@mariozechner/pi-tui": "^0.70.5",
     "typebox": "^1.1.24"
   },
   "pi": {

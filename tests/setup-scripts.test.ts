@@ -26,4 +26,12 @@ describe("documentation", () => {
 		expect(pkg.keywords).toContain("pi-extension");
 		expect(pkg.keywords).toContain("deepgram");
 	});
+
+	test("TypeBox uses Pi's runtime copy and a development-only local copy", () => {
+		// A production copy can bypass Pi's loader and duplicate runtime modules.
+		const pkg = JSON.parse(read("package.json"));
+		expect(pkg.dependencies?.typebox).toBeUndefined();
+		expect(pkg.peerDependencies?.typebox).toBe("*");
+		expect(typeof pkg.devDependencies?.typebox).toBe("string");
+	});
 });
